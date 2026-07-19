@@ -1241,21 +1241,37 @@ function runProgram() {
 
   // Let the run-indicator animation paint before the (blocking) run.
   setTimeout(() => {
+    const start = performance.now();
     try {
       const { boundsNotes } = Kestrel.run(codeEl.value, {
         onPrint: (s) => printLine(s)
       });
+      const elapsed = performance.now() - start;
       if (boundsNotes.length) {
         boundsNotes.forEach((n) => printLine('note: ' + n, 'note'));
       }
-      printLine('— finished —', 'ok');
+      printLine(`— finished in ${formatElapsed(elapsed)} —`, 'ok');
     } catch (e) {
+      const elapsed = performance.now() - start;
       printLine((e && e.message) ? e.message : String(e), 'err');
+      printLine(`— failed after ${formatElapsed(elapsed)} —`, 'err');
     } finally {
       markEl.classList.remove('running');
       runBtn.disabled = false;
     }
   }, 60);
+}
+
+function formatElapsed(ms) {
+  // This is wall-clock time for the whole run (lex + parse + purity
+  // check + interpret), not just the interpreter loop — and it includes
+  // whatever the device is doing at the moment, so treat it as a rough
+  // feel for "fast" vs "slow," not a benchmark. Sub-millisecond runs are
+  // reported to two decimal places since most example programs finish
+  // that quickly and "0 ms" isn't a useful answer.
+  if (ms < 1) return `${ms.toFixed(2)} ms`;
+  if (ms < 1000) return `${ms.toFixed(1)} ms`;
+  return `${(ms / 1000).toFixed(2)} s`;
 }
 
 function switchView(name) {
