@@ -1,12 +1,15 @@
 // AST -> Cranelift IR -> object file. Scope for now (see
-// kestrelc/README.md): every runtime value is an i64 (numbers, and
-// comparison/bool results as 0/1); string literals are only supported
-// directly as print() arguments, not as general values; arrays aren't
-// supported yet. Anything outside that scope is a clear compile error,
-// not a silent miscompile.
+// kestrelc/README.md): every scalar runtime value is an i64 (numbers,
+// and comparison/bool results as 0/1); arrays are a (pointer, length)
+// pair; string literals are only supported directly as print()
+// arguments, not as general values. Anything outside that scope is a
+// clear compile error, not a silent miscompile.
 
 use crate::ast::*;
-use cranelift_codegen::ir::{types, AbiParam, Function, InstBuilder, Signature, UserFuncName};
+use cranelift_codegen::ir::{
+    condcodes::IntCC, types, AbiParam, Function, InstBuilder, MemFlags, Signature, StackSlotData,
+    StackSlotKind, TrapCode, UserFuncName, Value,
+};
 use cranelift_codegen::isa::CallConv;
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_codegen::Context;
@@ -70,10 +73,19 @@ impl Codegen {
         })
     }
 
+    // Array-typed parameters occupy two i64 slots in the Cranelift
+    // signature (pointer, then length) instead of one — see the Slot
+    // enum below for why arrays need two Variables at all.
     fn fn_signature(program_fn: &Fn) -> Signature {
         let mut sig = Signature::new(CallConv::SystemV);
-        for _ in &program_fn.params {
-            sig.params.push(AbiParam::new(types::I64));
+        for p in &program_fn.params {
+            match &p.ty {
+                Type::Array { .. } => {
+                    sig.params.push(AbiParam::new(types::I64)); // pointer
+                    sig.params.push(AbiParam::new(types::I64)); // length
+                }
+                Type::Named(_) => sig.params.push(AbiParam::new(types::I64)),
+            }
         }
         sig.returns.push(AbiParam::new(types::I64));
         sig
@@ -117,16 +129,43 @@ impl Codegen {
             builder.switch_to_block(entry);
             builder.seal_block(entry);
 
-            let slots = collect_slots(f);
-            let mut vars: HashMap<String, Variable> = HashMap::new();
-            for (name, idx) in &slots {
-                let var = Variable::from_u32(*idx as u32);
-                builder.declare_var(var, types::I64);
-                vars.insert(name.clone(), var);
+            let slot_kinds = collect_slots(f);
+            let mut vars: HashMap<String, Slot> = HashMap::new();
+            let mut next_var: u32 = 0;
+            for (name, kind) in &slot_kinds {
+                match kind {
+                    SlotKind::Scalar => {
+                        let v = Variable::from_u32(next_var);
+                        next_var += 1;
+                        builder.declare_var(v, types::I64);
+                        vars.insert(name.clone(), Slot::Scalar(v));
+                    }
+                    SlotKind::Array { literal_len } => {
+                        let ptr = Variable::from_u32(next_var);
+                        let len = Variable::from_u32(next_var + 1);
+                        next_var += 2;
+                        builder.declare_var(ptr, types::I64);
+                        builder.declare_var(len, types::I64);
+                        vars.insert(name.clone(), Slot::Array { ptr, len, literal_len: *literal_len });
+                    }
+                }
             }
-            for (i, p) in f.params.iter().enumerate() {
-                let val = builder.block_params(entry)[i];
-                builder.def_var(vars[&p.name], val);
+            let mut param_idx = 0usize;
+            for p in &f.params {
+                match &vars[&p.name] {
+                    Slot::Scalar(v) => {
+                        let val = builder.block_params(entry)[param_idx];
+                        builder.def_var(*v, val);
+                        param_idx += 1;
+                    }
+                    Slot::Array { ptr, len, .. } => {
+                        let ptr_val = builder.block_params(entry)[param_idx];
+                        let len_val = builder.block_params(entry)[param_idx + 1];
+                        builder.def_var(*ptr, ptr_val);
+                        builder.def_var(*len, len_val);
+                        param_idx += 2;
+                    }
+                }
             }
 
             let mut fc = FnCodegen {
@@ -161,24 +200,60 @@ impl Codegen {
     }
 }
 
-// Every distinct name a function's body ever binds gets one Cranelift
-// `Variable` — params first, then each `let` in first-occurrence order,
-// walking into if/while bodies too. Same flat, non-block-scoped locals
-// story as kestrel.js's interpreter and bytecode VM (see kestrel.js's
-// collectSlots / SYNTAX.md) — kept consistent across all three backends
-// on purpose.
-fn add_slot(name: &str, slots: &mut Vec<(String, usize)>, seen: &mut HashMap<String, usize>) {
-    if !seen.contains_key(name) {
-        let idx = slots.len();
-        seen.insert(name.to_string(), idx);
-        slots.push((name.to_string(), idx));
+// Every distinct name a function's body ever binds gets Cranelift
+// `Variable`(s) — params first, then each `let` in first-occurrence
+// order, walking into if/while bodies too. Same flat, non-block-scoped
+// locals story as kestrel.js's interpreter and bytecode VM (see
+// kestrel.js's collectSlots / SYNTAX.md) — kept consistent across all
+// three backends on purpose.
+//
+// A scalar gets one Variable. An array gets two — a base pointer and a
+// length — since Cranelift Variables are single SSA values and an array
+// isn't one. `literal_len` is `Some(n)` for a `let x = [a, b, c];` (the
+// element count is known at compile time, from the literal), and `None`
+// for an array-typed parameter (the length is only known at runtime,
+// passed in by the caller).
+#[derive(Clone, Copy)]
+enum SlotKind {
+    Scalar,
+    Array { literal_len: Option<usize> },
+}
+
+enum Slot {
+    Scalar(Variable),
+    Array { ptr: Variable, len: Variable, literal_len: Option<usize> },
+}
+
+fn slot_kind_for_let(value: &Expr) -> SlotKind {
+    match value {
+        Expr::ArrayLit(elems) => SlotKind::Array { literal_len: Some(elems.len()) },
+        _ => SlotKind::Scalar,
     }
 }
 
-fn walk_slots(stmts: &[Stmt], slots: &mut Vec<(String, usize)>, seen: &mut HashMap<String, usize>) {
+fn slot_kind_for_param(ty: &Type) -> SlotKind {
+    match ty {
+        Type::Array { .. } => SlotKind::Array { literal_len: None },
+        Type::Named(_) => SlotKind::Scalar,
+    }
+}
+
+fn add_slot(
+    name: &str,
+    kind: SlotKind,
+    slots: &mut Vec<(String, SlotKind)>,
+    seen: &mut HashMap<String, ()>,
+) {
+    if !seen.contains_key(name) {
+        seen.insert(name.to_string(), ());
+        slots.push((name.to_string(), kind));
+    }
+}
+
+fn walk_slots(stmts: &[Stmt], slots: &mut Vec<(String, SlotKind)>, seen: &mut HashMap<String, ()>) {
     for s in stmts {
         match s {
-            Stmt::Let { name, .. } => add_slot(name, slots, seen),
+            Stmt::Let { name, value } => add_slot(name, slot_kind_for_let(value), slots, seen),
             Stmt::If { then_block, else_block, .. } => {
                 walk_slots(then_block, slots, seen);
                 if let Some(eb) = else_block {
@@ -191,11 +266,11 @@ fn walk_slots(stmts: &[Stmt], slots: &mut Vec<(String, usize)>, seen: &mut HashM
     }
 }
 
-fn collect_slots(f: &Fn) -> Vec<(String, usize)> {
-    let mut slots: Vec<(String, usize)> = Vec::new();
-    let mut seen: HashMap<String, usize> = HashMap::new();
+fn collect_slots(f: &Fn) -> Vec<(String, SlotKind)> {
+    let mut slots: Vec<(String, SlotKind)> = Vec::new();
+    let mut seen: HashMap<String, ()> = HashMap::new();
     for p in &f.params {
-        add_slot(&p.name, &mut slots, &mut seen);
+        add_slot(&p.name, slot_kind_for_param(&p.ty), &mut slots, &mut seen);
     }
     walk_slots(&f.body, &mut slots, &mut seen);
     slots
@@ -203,7 +278,7 @@ fn collect_slots(f: &Fn) -> Vec<(String, usize)> {
 
 struct FnCodegen<'a> {
     builder: FunctionBuilder<'a>,
-    vars: HashMap<String, Variable>,
+    vars: HashMap<String, Slot>,
     fn_ids: &'a HashMap<String, FuncId>,
     printf_id: FuncId,
     module: &'a mut ObjectModule,
@@ -225,20 +300,62 @@ impl<'a> FnCodegen<'a> {
         Ok(false)
     }
 
+    /// Shared by `let` and `=`: binds `name` to `value`, handling both
+    /// the scalar case (one Variable) and the array-literal case (stack
+    /// allocation + one store per element, then the ptr/len Variables).
+    fn gen_binding(&mut self, name: &str, value: &Expr) -> CgResult<()> {
+        match (&self.vars[name], value) {
+            (Slot::Scalar(var), _) => {
+                let var = *var;
+                let v = self.gen_expr(value)?;
+                self.builder.def_var(var, v);
+                Ok(())
+            }
+            (Slot::Array { ptr, len, literal_len }, Expr::ArrayLit(elems)) => {
+                let (ptr, len) = (*ptr, *len);
+                let expected = literal_len.expect("array let-bindings always have a literal_len");
+                if elems.len() != expected {
+                    // Only possible if the same name is bound to two
+                    // differently-sized literals in different branches —
+                    // collect_slots only records the first occurrence's size.
+                    return Err(CodegenError(format!(
+                        "kestrelc: array variable '{name}' rebound with a different length ({} vs {expected}) — not supported",
+                        elems.len()
+                    )));
+                }
+                let size_bytes = (elems.len() * 8) as u32;
+                let ss = self.builder.create_sized_stack_slot(StackSlotData::new(
+                    StackSlotKind::ExplicitSlot,
+                    size_bytes,
+                    3, // 8-byte (2^3) alignment for i64 elements
+                ));
+                let base = self.builder.ins().stack_addr(types::I64, ss, 0);
+                for (i, el) in elems.iter().enumerate() {
+                    let v = self.gen_expr(el)?;
+                    self.builder.ins().store(MemFlags::new(), v, base, (i * 8) as i32);
+                }
+                let len_val = self.builder.ins().iconst(types::I64, elems.len() as i64);
+                self.builder.def_var(ptr, base);
+                self.builder.def_var(len, len_val);
+                Ok(())
+            }
+            (Slot::Array { .. }, _) => Err(CodegenError(format!(
+                "kestrelc: '{name}' is an array variable and can only be (re)bound to an array literal so far"
+            ))),
+        }
+    }
+
     fn gen_stmt(&mut self, s: &Stmt) -> CgResult<bool> {
         match s {
             Stmt::Let { name, value } => {
-                let v = self.gen_expr(value)?;
-                self.builder.def_var(self.vars[name], v);
+                self.gen_binding(name, value)?;
                 Ok(false)
             }
             Stmt::Assign { name, value } => {
-                let var = *self
-                    .vars
-                    .get(name)
-                    .ok_or_else(|| CodegenError(format!("Assignment to unknown variable '{name}'")))?;
-                let v = self.gen_expr(value)?;
-                self.builder.def_var(var, v);
+                if !self.vars.contains_key(name) {
+                    return Err(CodegenError(format!("Assignment to unknown variable '{name}'")));
+                }
+                self.gen_binding(name, value)?;
                 Ok(false)
             }
             Stmt::If { cond, then_block, else_block } => {
@@ -381,24 +498,73 @@ impl<'a> FnCodegen<'a> {
         Ok(())
     }
 
-    fn gen_expr(&mut self, e: &Expr) -> CgResult<cranelift_codegen::ir::Value> {
-        use cranelift_codegen::ir::condcodes::IntCC;
+    /// Resolves an expression that must denote an array to its (pointer,
+    /// length) pair. Scope for now: only a plain identifier naming an
+    /// array local/parameter — matches every array use in the example
+    /// programs (`arr[i]`, `get_safe(nums, i)`), and gives a clear error
+    /// for anything fancier (e.g. indexing the result of a call) rather
+    /// than silently doing the wrong thing.
+    fn resolve_array(&mut self, e: &Expr) -> CgResult<(Value, Value)> {
+        let name = match e {
+            Expr::Ident(name) => name,
+            _ => {
+                return Err(CodegenError(
+                    "kestrelc only supports indexing/passing a plain array variable so far".into(),
+                ))
+            }
+        };
+        match self.vars.get(name) {
+            Some(Slot::Array { ptr, len, .. }) => Ok((self.builder.use_var(*ptr), self.builder.use_var(*len))),
+            Some(Slot::Scalar(_)) => Err(CodegenError(format!("'{name}' is not an array"))),
+            None => Err(CodegenError(format!("Unknown identifier '{name}'"))),
+        }
+    }
+
+    fn gen_expr(&mut self, e: &Expr) -> CgResult<Value> {
         match e {
             Expr::Num(n) => Ok(self.builder.ins().iconst(types::I64, *n)),
             Expr::Bool(b) => Ok(self.builder.ins().iconst(types::I64, if *b { 1 } else { 0 })),
             Expr::Str(_) => Err(CodegenError(
                 "kestrelc only supports string literals as direct print() arguments so far".into(),
             )),
-            Expr::Ident(name) => {
-                let var = self
-                    .vars
-                    .get(name)
-                    .ok_or_else(|| CodegenError(format!("Unknown identifier '{name}'")))?;
-                Ok(self.builder.use_var(*var))
-            }
-            Expr::ArrayLit(_) | Expr::Index { .. } => Err(CodegenError(
-                "kestrelc doesn't support arrays yet — see kestrelc/README.md".into(),
+            Expr::Ident(name) => match self.vars.get(name) {
+                Some(Slot::Scalar(var)) => Ok(self.builder.use_var(*var)),
+                Some(Slot::Array { .. }) => Err(CodegenError(format!(
+                    "'{name}' is an array — it can only be indexed (arr[i]) or passed to a function, not used as a value directly"
+                ))),
+                None => Err(CodegenError(format!("Unknown identifier '{name}'"))),
+            },
+            Expr::ArrayLit(_) => Err(CodegenError(
+                "kestrelc only supports array literals as the direct value of a `let`/assignment so far".into(),
             )),
+            Expr::Index { target, index } => {
+                let (ptr, len) = self.resolve_array(target)?;
+                let idx = self.gen_expr(index)?;
+
+                let zero = self.builder.ins().iconst(types::I64, 0);
+                let too_low = self.builder.ins().icmp(IntCC::SignedLessThan, idx, zero);
+                let too_high = self.builder.ins().icmp(IntCC::SignedGreaterThanOrEqual, idx, len);
+                let out_of_bounds = self.builder.ins().bor(too_low, too_high);
+
+                let ok_blk = self.builder.create_block();
+                let oob_blk = self.builder.create_block();
+                self.builder.ins().brif(out_of_bounds, oob_blk, &[], ok_blk, &[]);
+
+                self.builder.switch_to_block(oob_blk);
+                self.builder.seal_block(oob_blk);
+                // Matches run()/runFast()'s "always check" behavior, but not
+                // (yet) their friendly error message — trapping here halts
+                // the process immediately rather than printing and exiting.
+                // Proof-based elision of this check entirely (the actual
+                // `where i < N` feature) is still future work — see README.
+                self.builder.ins().trap(TrapCode::unwrap_user(1));
+
+                self.builder.switch_to_block(ok_blk);
+                self.builder.seal_block(ok_blk);
+                let offset = self.builder.ins().imul_imm(idx, 8);
+                let addr = self.builder.ins().iadd(ptr, offset);
+                Ok(self.builder.ins().load(types::I64, MemFlags::new(), addr, 0))
+            }
             Expr::Unary { op, expr } => {
                 let v = self.gen_expr(expr)?;
                 match op {
@@ -457,7 +623,17 @@ impl<'a> FnCodegen<'a> {
                     .ok_or_else(|| CodegenError(format!("Unknown function '{name}'")))?;
                 let mut arg_vals = Vec::with_capacity(args.len());
                 for a in args {
-                    arg_vals.push(self.gen_expr(a)?);
+                    // An array argument expands to two Cranelift values
+                    // (pointer, length), matching fn_signature's two
+                    // AbiParams per array-typed parameter.
+                    let is_array_ident = matches!(a, Expr::Ident(n) if matches!(self.vars.get(n), Some(Slot::Array { .. })));
+                    if is_array_ident {
+                        let (ptr, len) = self.resolve_array(a)?;
+                        arg_vals.push(ptr);
+                        arg_vals.push(len);
+                    } else {
+                        arg_vals.push(self.gen_expr(a)?);
+                    }
                 }
                 let local_func = self.module.declare_func_in_func(func_id, self.builder.func);
                 let call = self.builder.ins().call(local_func, &arg_vals);

@@ -160,9 +160,11 @@ using [Cranelift](https://cranelift.dev/) that emits an actual
 standalone executable (via `cranelift-object` + the system linker) —
 no VM, no interpreter loop at runtime at all. It's a separate Rust
 program from `kestrel.js`, not something that runs in the browser
-editor. See `kestrelc/README.md` for its supported subset (currently:
-integers only, no arrays yet — see that file for the full scope and
-why) and the full benchmark methodology behind the numbers below.
+editor. It now supports arrays (literals, indexing, array-typed
+parameters — always bounds-checked, never silently trusted) alongside
+integers, functions/recursion, and control flow. See `kestrelc/README.md`
+for the exact supported subset and the full benchmark methodology behind
+the numbers below.
 
 Both `run`/`runFast` support:
 - variables, arithmetic, `if`/`else`, `while`
@@ -242,8 +244,12 @@ would." That's the honest ceiling of what's measured here, and also
 exactly where the next work goes.
 
 Not yet implemented (future work, roughly in priority order):
-1. Arrays and real bounds-proof enforcement in `kestrelc` (currently a
-   clean compile error, not silently wrong code)
+1. Proof-based bounds-check *elision* in `kestrelc` — arrays now work
+   and are always runtime-checked (never silently trusted), but the
+   check is never skipped even when the compiler could prove it
+   unnecessary, which is the actual "proof-carrying optimization" idea
+   (#4 above). Also: a friendlier failure than a bare trap on the
+   fallback runtime check.
 2. Closing the remaining ~9% call-overhead gap in `runFast` on
    recursion-heavy code — lower priority now that `kestrelc` exists and
    already dwarfs any remaining VM-tuning gains

@@ -34,10 +34,10 @@ of `kestrel.js`'s and accepts the full grammar in `docs/SYNTAX.md`.
 Codegen, however, currently supports a subset:
 
 **Supported:**
-- Every runtime value is a 64-bit integer (numbers, and comparison/`true`/`false`
-  results as 0/1) — no floats yet; a literal like `3.14` is a clean
-  compile-time error ("kestrelc only supports integer literals so far"),
-  not silently truncated
+- Every scalar runtime value is a 64-bit integer (numbers, and
+  comparison/`true`/`false` results as 0/1) — no floats yet; a literal
+  like `3.14` is a clean compile-time error ("kestrelc only supports
+  integer literals so far"), not silently truncated
 - Functions, including recursion, and `pure fn` (checked, same rules and
   error messages as `kestrel.js`)
 - `let`, assignment, `if`/`else`, `while`
@@ -46,17 +46,26 @@ Codegen, however, currently supports a subset:
 - `print`, with string literals **only as direct print() arguments**
   (`print("x =", x)` works; storing a string in a variable or passing
   one to a function does not)
+- **Arrays**: literals (`let a = [1, 2, 3];`), array-typed parameters
+  (`fn f(a: [i32; N])`), and indexing (`a[i]`) — represented at runtime as
+  a (pointer, length) pair, indexing is **always bounds-checked** (same
+  as `run`/`runFast`; the check is never skipped). A failing check
+  **traps the process (`SIGILL`) immediately** rather than printing a
+  message and exiting cleanly like the other two backends do — a real,
+  known difference, not yet fixed. Array values can only be indexed or
+  passed to a function so far — not returned, not stored inside another
+  array, not aliased with a second `let`.
 
 **Not supported yet — a clear compile error, never a silent miscompile:**
-- Arrays (`Expr::ArrayLit`, `Expr::Index`, `[T; N]` types) — parses fine,
-  fails at codegen with "kestrelc doesn't support arrays yet"
-- `where` bounds-proof clauses — parsed and currently silently ignored
-  (no runtime check is emitted at all, unlike `run`/`runFast`, which
-  always check). **Do not rely on bounds safety in kestrelc-compiled
-  code yet** — this is the top item in `kestrel-DESIGN.md`'s priority
-  list for exactly this reason.
+- `where` bounds-proof clauses — parsed and currently ignored by codegen.
+  The check still always happens at runtime (see above), so this is
+  purely about the *optimization* the design doc describes (skipping the
+  check entirely when the compiler can prove it's unnecessary) not being
+  implemented yet — safety isn't affected either way.
 - Strings as general values (only as literal print arguments)
 - Floats with real fractional semantics
+- Indexing/passing anything other than a plain array variable (e.g. the
+  result of a function call, or a nested array expression)
 
 ## Benchmarks
 
@@ -120,3 +129,11 @@ implemented here at all.
 - **Every function returns `i64`**, even ones with no `-> type` in the
   source (returning 0 in that case) — avoids modeling void functions
   separately for now.
+- **Arrays are (pointer, length) pairs** — two Cranelift `Variable`s per
+  array-typed name instead of one, since a Variable is a single SSA
+  value. A `let x = [1, 2, 3];` stack-allocates the exact byte size
+  (`create_sized_stack_slot`) and stores each element; an array-typed
+  parameter gets two `AbiParam`s in the Cranelift signature instead of
+  one, and the caller passes both values at the call site. Indexing
+  computes `ptr + index * 8` and does the bounds compare inline before
+  the load — no separate bounds-checking function to call.
