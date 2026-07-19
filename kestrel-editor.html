@@ -159,6 +159,10 @@
     <option value="fib">fibonacci</option>
     <option value="purity">purity check</option>
   </select>
+  <select class="examples" id="engine" title="Fast: bytecode VM, faster on loops/arrays. Compat: tree-walking interpreter, ~9% faster on deep recursion.">
+    <option value="fast" selected>engine: fast</option>
+    <option value="compat">engine: compat</option>
+  </select>
   <button class="run-btn" id="runBtn">▶ Run</button>
 </header>
 
@@ -1084,6 +1088,7 @@ const outputEl = document.getElementById('output');
 const statusEl = document.getElementById('status');
 const markEl = document.getElementById('mark');
 const runBtn = document.getElementById('runBtn');
+const engineEl = document.getElementById('engine');
 
 const EXAMPLES = {
   basics: `pure fn square(x: i32) -> i32 {
@@ -1241,20 +1246,22 @@ function runProgram() {
 
   // Let the run-indicator animation paint before the (blocking) run.
   setTimeout(() => {
+    const useFast = engineEl.value === 'fast';
+    const runFn = useFast ? Kestrel.runFast : Kestrel.run;
     const start = performance.now();
     try {
-      const { boundsNotes } = Kestrel.run(codeEl.value, {
+      const { boundsNotes } = runFn(codeEl.value, {
         onPrint: (s) => printLine(s)
       });
       const elapsed = performance.now() - start;
       if (boundsNotes.length) {
         boundsNotes.forEach((n) => printLine('note: ' + n, 'note'));
       }
-      printLine(`— finished in ${formatElapsed(elapsed)} —`, 'ok');
+      printLine(`— finished in ${formatElapsed(elapsed)} (${useFast ? 'fast' : 'compat'}) —`, 'ok');
     } catch (e) {
       const elapsed = performance.now() - start;
       printLine((e && e.message) ? e.message : String(e), 'err');
-      printLine(`— failed after ${formatElapsed(elapsed)} —`, 'err');
+      printLine(`— failed after ${formatElapsed(elapsed)} (${useFast ? 'fast' : 'compat'}) —`, 'err');
     } finally {
       markEl.classList.remove('running');
       runBtn.disabled = false;
