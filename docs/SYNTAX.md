@@ -16,11 +16,12 @@ There's also a third, separate implementation: `kestrelc/`, a native
 compiler (Rust + Cranelift) that emits a real standalone executable
 instead of running on either JS backend. Its front end accepts this
 same full grammar, but its code generator currently only supports a
-subset — integers, functions/recursion, `if`/`while`, `print` with
+subset — integers, arrays (literals, indexing, array-typed parameters,
+always bounds-checked), functions/recursion, `if`/`while`, `print` with
 string-literal arguments — and gives a clear compile error (never a
-silent miscompile) for anything outside that, like arrays. See
-`kestrelc/README.md` for the exact scope and real, measured performance
-numbers.
+silent miscompile) for anything outside that, like floats or strings as
+general values. See `kestrelc/README.md` for the exact scope and real,
+measured performance numbers.
 
 ## Comments
 

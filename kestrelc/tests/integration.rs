@@ -76,16 +76,88 @@ fn rejects_purity_violation_kes_at_compile_time() {
 }
 
 #[test]
-fn rejects_array_usage_with_a_clear_error_not_a_crash() {
-    // Arrays aren't supported yet (see kestrelc/README.md) — basics.kes
-    // uses them, so it must fail cleanly, not silently miscompile or panic.
+fn compiles_and_runs_basics_kes_with_correct_output() {
+    // basics.kes exercises array literals, array parameters, and
+    // indexing (get_safe) — the array support this test file covers.
     let scratch = scratch_dir("basics");
-    let (ok, stderr, _bin) = compile("basics.kes", &scratch);
-    assert!(!ok, "kestrelc should have refused to compile array usage");
-    assert!(
-        stderr.contains("doesn't support arrays yet"),
-        "expected the arrays-not-supported error, got:\n{stderr}"
-    );
+    let (ok, stderr, bin) = compile("basics.kes", &scratch);
+    assert!(ok, "kestrelc failed to compile basics.kes:\n{stderr}");
+
+    let run = Command::new(&bin).output().expect("failed to run compiled binary");
+    assert!(run.status.success(), "compiled basics binary exited with failure");
+    let stdout = String::from_utf8_lossy(&run.stdout);
+
+    let expected = "\
+square: 9
+square: 16
+square: 25
+square: 36
+sum of squares(3,4) = 25
+safe get nums[2] = 5
+";
+    assert_eq!(stdout, expected);
+}
+
+#[test]
+fn out_of_bounds_array_access_traps_instead_of_reading_garbage() {
+    // No proof-based elision yet (see README) — every index is
+    // runtime-checked, and a failing check halts the process (SIGILL)
+    // rather than silently returning whatever happened to be in memory.
+    let scratch = scratch_dir("oob");
+    let src_path = scratch.join("oob.kes");
+    fs::write(
+        &src_path,
+        r#"
+        fn main() {
+            let a = [1, 2, 3];
+            print(a[5]);
+        }
+        "#,
+    )
+    .unwrap();
+
+    let out = Command::new(kestrelc_bin())
+        .arg(&src_path)
+        .current_dir(&scratch)
+        .output()
+        .expect("failed to run kestrelc");
+    assert!(out.status.success(), "compile failed:\n{}", String::from_utf8_lossy(&out.stderr));
+
+    let bin = scratch.join("oob");
+    let run = Command::new(&bin).output().expect("failed to run compiled binary");
+    assert!(!run.status.success(), "out-of-bounds access should not exit successfully");
+    assert!(run.stdout.is_empty(), "should trap before printing anything");
+}
+
+#[test]
+fn array_parameter_and_indexing_produce_correct_results() {
+    let scratch = scratch_dir("arrparam");
+    let src_path = scratch.join("arrparam.kes");
+    fs::write(
+        &src_path,
+        r#"
+        fn sum3(a: [i32; N]) -> i32 {
+            return a[0] + a[1] + a[2];
+        }
+        fn main() {
+            let xs = [10, 20, 30];
+            print(sum3(xs));
+            print(xs[1]);
+        }
+        "#,
+    )
+    .unwrap();
+
+    let out = Command::new(kestrelc_bin())
+        .arg(&src_path)
+        .current_dir(&scratch)
+        .output()
+        .expect("failed to run kestrelc");
+    assert!(out.status.success(), "compile failed:\n{}", String::from_utf8_lossy(&out.stderr));
+
+    let bin = scratch.join("arrparam");
+    let run = Command::new(&bin).output().expect("failed to run compiled binary");
+    assert_eq!(String::from_utf8_lossy(&run.stdout), "60\n20\n");
 }
 
 #[test]
