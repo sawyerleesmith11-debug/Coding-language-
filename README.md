@@ -15,6 +15,11 @@ for the syntax reference and grammar.
   two backends: `Kestrel.run` (tree-walking interpreter) and
   `Kestrel.runFast` (bytecode compiler + stack VM). Zero dependencies;
   runs unmodified in Node or as a browser `<script>`.
+- `kestrelc/` — a real native compiler (Rust + Cranelift) that emits a
+  standalone executable, no VM at runtime at all. Separate program from
+  `kestrel.js`; supports a subset of the language so far (see
+  `kestrelc/README.md`) but already lands within a few multiples of
+  hand-written Rust/C++ on what it does support.
 - `kestrel-editor.html` — a single-file mobile code editor/IDE (embeds
   `kestrel.js` inline; add to iPhone home screen via Safari for an
   app-like experience). Auto-deployed to GitHub Pages on every push to
@@ -47,12 +52,15 @@ npm test
 
 ## Status
 
-Two backends now exist — `run` (tree-walking) and `runFast` (bytecode
-VM) — and are semantics-identical, but `runFast` is only faster on
-loop/array-heavy code (~40-54% in early benchmarks) and currently
-slightly *slower* on deep-recursion-heavy code. See the benchmark table
-and honest writeup in `kestrel-DESIGN.md` before picking one for
-performance-sensitive code. Next up, in priority order: closing that
-recursion gap, then a native (LLVM/Cranelift) backend, the persistent
-cross-run optimization cache, layout polymorphism, and a more general
-proof system.
+Three implementations now exist. `run` (tree-walking) and `runFast`
+(bytecode VM) are semantics-identical and both cover the full language;
+`runFast` is faster on loop/array-heavy code and currently slightly
+slower on deep-recursion-heavy code. `kestrelc` (native, via Cranelift)
+compiles a subset of the language straight to a real executable and is
+**~50-175x faster than `runFast`**, landing within a few multiples of
+hand-written Rust/C++ on its first working version — see
+`kestrelc/README.md` for its exact scope and `kestrel-DESIGN.md` for the
+full benchmark writeup and methodology. Next up, in priority order:
+arrays and real bounds-check enforcement in `kestrelc`, the persistent
+cross-run optimization cache, layout polymorphism, a more general proof
+system, and CPU parallelism for `pure` functions.

@@ -155,16 +155,16 @@ produces the same output, and every error case throws the same
   variables are array-index slots instead of name-keyed object
   properties (see `docs/SYNTAX.md` for how it's built).
 
-**In progress:** `kestrelc/`, a real native compiler using
-[Cranelift](https://cranelift.dev/) to emit an actual standalone
-executable (via `cranelift-object` + the system linker) instead of
-running on a VM at all. It's a separate Rust program from `kestrel.js`,
-not something that runs in the browser editor — see `kestrelc/README.md`
-once it lands for its current status and supported subset. This section
-will be updated with real, measured numbers once it can compile and run
-a program end to end — no performance claims for it until then.
+**A third backend now exists:** `kestrelc/`, a real native compiler
+using [Cranelift](https://cranelift.dev/) that emits an actual
+standalone executable (via `cranelift-object` + the system linker) —
+no VM, no interpreter loop at runtime at all. It's a separate Rust
+program from `kestrel.js`, not something that runs in the browser
+editor. See `kestrelc/README.md` for its supported subset (currently:
+integers only, no arrays yet — see that file for the full scope and
+why) and the full benchmark methodology behind the numbers below.
 
-Both support:
+Both `run`/`runFast` support:
 - variables, arithmetic, `if`/`else`, `while`
 - functions, including `pure fn` with a real (if simplified) purity
   checker: a pure function is rejected at compile time if it calls an
@@ -203,28 +203,55 @@ itself plus the per-call stack bookkeeping, and would need either a
 JIT-style specialization for hot call sites or inlining small functions
 at compile time to close fully.
 
-For scale, the same three workloads in Rust (`rustc -O`) and C++
-(`g++ -O2`) run in low single-digit milliseconds each — roughly
-100-800x faster than either Kestrel backend, depending on the workload.
-That gap is expected and not a sign of an unusually slow implementation:
-Kestrel is currently an interpreter running *on top of* JavaScript
-(itself not compiling straight to machine code), while Rust/C++ compile
+For scale, the same workloads in Rust (`rustc -O`) and C++ (`g++ -O2`)
+run in low single-digit milliseconds each — roughly 100-800x faster
+than either Kestrel JS backend, depending on the workload. That gap is
+expected, not a sign of an unusually slow implementation: `run`/`runFast`
+are interpreters running *on top of* JavaScript, while Rust/C++ compile
 directly to native instructions with no interpreter loop underneath at
-all. That gap — not the run-vs-runFast difference — is the real
-argument for eventually reaching for a native backend.
+all.
+
+**`kestrelc` closes almost all of that gap, on its very first working
+version, with zero custom optimizations beyond Cranelift's own defaults**
+(no inlining, no bounds-check elimination, no persistent cache — none of
+the ideas above are wired in yet). Measured the same way as the Rust/C++
+numbers above (process-external, best-of-N, this machine):
+
+| Workload | `run` | `runFast` | **`kestrelc` (native)** | Rust | C++ |
+|---|---|---|---|---|---|
+| `fib(30)`, naive recursion | 384 ms | 420 ms | **8.5 ms** | 2.9-3.4 ms | 1.65-1.7 ms |
+| Arithmetic loop, 20M iterations | 5150 ms | 2600 ms | **15.0 ms** | ~8 ms | ~14.5 ms |
+
+That's **kestrelc beating `runFast` by roughly 45-175x**, and landing
+within **roughly 2-5x of hand-written Rust/C++** — on the loop workload,
+it's already within the same margin as the C++ number. See
+`kestrelc/README.md` for exactly how these were measured (external
+process timing was used for every column so the comparison is apples to
+apples; an in-process/compute-only estimate is also given there and is
+even closer).
+
+The honest caveats: `kestrelc` only supports integers, `if`/`while`,
+functions/recursion, and `print` so far — no arrays, no strings as
+general values, no bounds proofs enforced yet (see `kestrelc/README.md`
+for the exact scope and why). And the *interesting* ideas in this
+document — the persistent cache, proof-carrying bounds elimination,
+layout polymorphism — aren't implemented in `kestrelc` at all yet; this
+is "compile straight to machine code with a mature, off-the-shelf
+optimizing backend," not yet "compile *smarter* than a normal compiler
+would." That's the honest ceiling of what's measured here, and also
+exactly where the next work goes.
 
 Not yet implemented (future work, roughly in priority order):
-1. Closing the remaining ~9% call-overhead gap on recursion-heavy code
-   (hot-call specialization or compile-time inlining of small functions)
-2. A native backend (LLVM/Cranelift) — worth revisiting once (1) is
-   closed, since the 100-800x gap against native code dwarfs anything
-   left to gain from further VM tuning
-3. The persistent cross-run optimization cache
+1. Arrays and real bounds-proof enforcement in `kestrelc` (currently a
+   clean compile error, not silently wrong code)
+2. Closing the remaining ~9% call-overhead gap in `runFast` on
+   recursion-heavy code — lower priority now that `kestrelc` exists and
+   already dwarfs any remaining VM-tuning gains
+3. The persistent cross-run optimization cache, built on top of `kestrelc`
 4. Layout polymorphism
 5. A more general proof system beyond simple bounds checks
 6. CPU-side parallelism for `pure` functions over collections (idea #5)
-   — comes after (2), since there's nothing to distribute across cores
-   until Kestrel is generating real machine code
+   — now unblocked, since `kestrelc` generates real machine code
 7. SIMD, then (much further out) a GPU backend — both extensions of (6)
 
 ## Naming
