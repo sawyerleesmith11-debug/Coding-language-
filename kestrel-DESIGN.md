@@ -244,12 +244,13 @@ would." That's the honest ceiling of what's measured here, and also
 exactly where the next work goes.
 
 Not yet implemented (future work, roughly in priority order):
-1. Proof-based bounds-check *elision* in `kestrelc` — arrays now work
-   and are always runtime-checked (never silently trusted), but the
-   check is never skipped even when the compiler could prove it
-   unnecessary, which is the actual "proof-carrying optimization" idea
-   (#4 above). Also: a friendlier failure than a bare trap on the
-   fallback runtime check.
+1. Proof-based bounds-check *elision* in `kestrelc` — a first, narrow
+   slice now exists (a literal index into a `let`-literal array is
+   proven safe/unsafe entirely at compile time, no runtime check either
+   way, per idea #4 above). Still missing: reasoning across a function
+   call boundary (proving a *parameter's* `where i < N` from what the
+   caller passed, the general case in the design example), and a
+   friendlier failure than a bare trap on the runtime-check fallback.
 2. Closing the remaining ~9% call-overhead gap in `runFast` on
    recursion-heavy code — lower priority now that `kestrelc` exists and
    already dwarfs any remaining VM-tuning gains

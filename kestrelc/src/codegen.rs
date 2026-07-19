@@ -520,6 +520,22 @@ impl<'a> FnCodegen<'a> {
         }
     }
 
+    /// The array's element count, if it's known at compile time (i.e. a
+    /// `let x = [literal, ...]` local — array *parameters* never have a
+    /// compile-time-known length, since it arrives as a runtime value
+    /// from the caller). Used only to decide whether a bounds check can
+    /// be proven at compile time; doesn't affect the (ptr, len) values
+    /// actually used at runtime.
+    fn static_array_len(&self, e: &Expr) -> Option<usize> {
+        match e {
+            Expr::Ident(name) => match self.vars.get(name) {
+                Some(Slot::Array { literal_len, .. }) => *literal_len,
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     fn gen_expr(&mut self, e: &Expr) -> CgResult<Value> {
         match e {
             Expr::Num(n) => Ok(self.builder.ins().iconst(types::I64, *n)),
@@ -538,6 +554,24 @@ impl<'a> FnCodegen<'a> {
                 "kestrelc only supports array literals as the direct value of a `let`/assignment so far".into(),
             )),
             Expr::Index { target, index } => {
+                // Proof-carrying fast path: a literal index into an array
+                // whose length is also known at compile time (a `let`
+                // literal, not a parameter) can be proven safe — or
+                // proven *unsafe* — right now, with no runtime check
+                // needed either way. This is deliberately narrow (see
+                // kestrelc/README.md): it doesn't yet reason about a
+                // `where i < N` clause across a call boundary, only this
+                // direct, fully-static case.
+                if let (Expr::Num(n), Some(static_len)) = (index.as_ref(), self.static_array_len(target)) {
+                    if *n < 0 || *n as usize >= static_len {
+                        return Err(CodegenError(format!(
+                            "index {n} is out of bounds for array of length {static_len} — proven at compile time, not deferred to a runtime check"
+                        )));
+                    }
+                    let (ptr, _len) = self.resolve_array(target)?;
+                    return Ok(self.builder.ins().load(types::I64, MemFlags::new(), ptr, (*n * 8) as i32));
+                }
+
                 let (ptr, len) = self.resolve_array(target)?;
                 let idx = self.gen_expr(index)?;
 
@@ -555,8 +589,6 @@ impl<'a> FnCodegen<'a> {
                 // Matches run()/runFast()'s "always check" behavior, but not
                 // (yet) their friendly error message — trapping here halts
                 // the process immediately rather than printing and exiting.
-                // Proof-based elision of this check entirely (the actual
-                // `where i < N` feature) is still future work — see README.
                 self.builder.ins().trap(TrapCode::unwrap_user(1));
 
                 self.builder.switch_to_block(ok_blk);

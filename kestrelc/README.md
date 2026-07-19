@@ -48,20 +48,26 @@ Codegen, however, currently supports a subset:
   one to a function does not)
 - **Arrays**: literals (`let a = [1, 2, 3];`), array-typed parameters
   (`fn f(a: [i32; N])`), and indexing (`a[i]`) — represented at runtime as
-  a (pointer, length) pair, indexing is **always bounds-checked** (same
-  as `run`/`runFast`; the check is never skipped). A failing check
-  **traps the process (`SIGILL`) immediately** rather than printing a
-  message and exiting cleanly like the other two backends do — a real,
-  known difference, not yet fixed. Array values can only be indexed or
-  passed to a function so far — not returned, not stored inside another
-  array, not aliased with a second `let`.
+  a (pointer, length) pair. Array values can only be indexed or passed to
+  a function so far — not returned, not stored inside another array, not
+  aliased with a second `let`.
+- **A first, narrow slice of proof-carrying bounds elision**: a literal
+  index into a `let`-literal array (`a[2]` where `a = [1,2,3]`) is proven
+  safe — or proven *unsafe* — entirely at compile time, with **no runtime
+  check at all** either way. A provably-out-of-bounds literal index is a
+  **compile error**, not a runtime surprise, matching the design doc's
+  own stated philosophy exactly. Anything less static than that (a
+  variable index, or an array-typed parameter whose length is a runtime
+  value) still falls back to a runtime bounds check, same as `run`/
+  `runFast`; a failing runtime check **traps the process (`SIGILL`)
+  immediately** rather than printing a message and exiting cleanly like
+  the other two backends do — a real, known difference, not yet fixed.
 
 **Not supported yet — a clear compile error, never a silent miscompile:**
-- `where` bounds-proof clauses — parsed and currently ignored by codegen.
-  The check still always happens at runtime (see above), so this is
-  purely about the *optimization* the design doc describes (skipping the
-  check entirely when the compiler can prove it's unnecessary) not being
-  implemented yet — safety isn't affected either way.
+- The general `where i < N` clause — reasoning across a function-call
+  boundary (proving a *parameter's* index is safe based on what the
+  caller passed) isn't implemented, only the fully-local literal case
+  above. `where` clauses are currently parsed and otherwise ignored.
 - Strings as general values (only as literal print arguments)
 - Floats with real fractional semantics
 - Indexing/passing anything other than a plain array variable (e.g. the
