@@ -1,0 +1,23 @@
+pure fn square(x: i32) -> i32 {
+    return x * x;
+}
+
+pure fn sum_of_squares(a: i32, b: i32) -> i32 {
+    return square(a) + square(b);
+}
+
+fn get_safe(arr: [i32; N], i: usize) -> i32 where i < N {
+    return arr[i];
+}
+
+fn main() {
+    let nums = [3, 4, 5, 6];
+    let i = 0;
+    while (i < 4) {
+        print("square:", square(nums[i]));
+        i = i + 1;
+    }
+
+    print("sum of squares(3,4) =", sum_of_squares(3, 4));
+    print("safe get nums[2] =", get_safe(nums, 2));
+}
