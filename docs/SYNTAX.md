@@ -1,9 +1,26 @@
 # Kestrel Syntax Reference
 
-This documents exactly what the current interpreter (`kestrel.js`)
+This documents exactly what the current implementation (`kestrel.js`)
 accepts — not the aspirational features in `kestrel-DESIGN.md` (layout
 polymorphism, the optimization cache, general proof system). If it's
 not in a code example below, it isn't implemented yet.
+
+Everything here applies identically to `Kestrel.run` (tree-walking
+interpreter) and `Kestrel.runFast` (bytecode compiler + stack VM). They
+share the same lexer, parser, purity checker, and bounds-proof pass, and
+are semantics-identical: same output, same errors, same messages.
+`runFast` is not uniformly faster — see the benchmark table in
+`kestrel-DESIGN.md` before assuming it's the one to reach for.
+
+There's also a third, separate implementation: `kestrelc/`, a native
+compiler (Rust + Cranelift) that emits a real standalone executable
+instead of running on either JS backend. Its front end accepts this
+same full grammar, but its code generator currently only supports a
+subset — integers, functions/recursion, `if`/`while`, `print` with
+string-literal arguments — and gives a clear compile error (never a
+silent miscompile) for anything outside that, like arrays. See
+`kestrelc/README.md` for the exact scope and real, measured performance
+numbers.
 
 ## Comments
 

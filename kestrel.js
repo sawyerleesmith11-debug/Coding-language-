@@ -512,6 +512,337 @@ function interpret(program, { onPrint = (s) => console.log(s) } = {}) {
   return callFn("main", []);
 }
 
+// ============================== BYTECODE COMPILER ==============================
+// Compiles each function to a flat list of instructions with slot-indexed
+// locals (a plain array per call) instead of the tree-walker's name-keyed
+// env object. Property lookups on a dictionary-mode object are the main
+// cost the tree-walker pays per variable access; array-index locals let
+// the VM skip that entirely. Semantics are kept bug-for-bug identical to
+// `interpret` above (including non-short-circuiting && / ||, and the flat,
+// non-block-scoped variable namespace — a `let` inside an `if` is visible
+// for the rest of the function, exactly as it is in the tree-walker).
+
+// Every distinct name a function's body ever binds — params first, then
+// each `let` in first-occurrence order — gets one array slot. There's no
+// block scoping in Kestrel, so this single static pass over the whole
+// body (not just the top level) is enough to size the locals array.
+function collectSlots(fn) {
+  const slots = new Map();
+  for (const p of fn.params) {
+    if (!slots.has(p.name)) slots.set(p.name, slots.size);
+  }
+  function walkStmts(stmts) {
+    for (const s of stmts) {
+      switch (s.kind) {
+        case "let":
+          if (!slots.has(s.name)) slots.set(s.name, slots.size);
+          break;
+        case "if":
+          walkStmts(s.thenBlock);
+          if (s.elseBlock) walkStmts(s.elseBlock);
+          break;
+        case "while":
+          walkStmts(s.body);
+          break;
+      }
+    }
+  }
+  walkStmts(fn.body);
+  return slots;
+}
+
+// Every instruction is emitted with the exact same object shape —
+// { op, a, b }, always in this key order — even though most opcodes only
+// use one field or none. Mixed shapes (some instructions with `.value`,
+// others with `.slot` or `.name`) make every `ins.op`/`ins.a` read
+// megamorphic in V8, since the code array holds many different hidden
+// classes; profiling an early version of this VM showed that dominating
+// the runtime (LoadIC_Megamorphic) even more than the interpretation loop
+// itself. One consistent shape keeps property access monomorphic.
+const OP = {
+  CONST: 0, LOAD: 1, STORE: 2, ARRAY: 3, INDEX: 4, UNOP: 5, BINOP: 6,
+  CALL: 7, PRINT: 8, POP: 9, JUMP: 10, JUMP_IF_FALSE: 11,
+  RETURN_VALUE: 12, RETURN_NULL: 13,
+};
+
+function compile(program) {
+  const functions = new Map();
+  for (const fn of program) {
+    const slots = collectSlots(fn);
+    functions.set(fn.name, {
+      name: fn.name,
+      paramCount: fn.params.length,
+      slotCount: slots.size,
+      slots,
+      code: [],
+    });
+  }
+
+  const emit = (code, op, a = null, b = null) => { code.push({ op, a, b }); return code.length - 1; };
+  const patch = (code, idx) => { code[idx].a = code.length; };
+
+  function compileExpr(e, ctx) {
+    const { code, slots } = ctx;
+    switch (e.kind) {
+      case "num": case "str": case "bool":
+        emit(code, OP.CONST, e.value);
+        break;
+      case "ident":
+        if (!slots.has(e.name)) throw new KestrelError(`Unknown identifier '${e.name}'`);
+        emit(code, OP.LOAD, slots.get(e.name));
+        break;
+      case "array_lit":
+        e.elems.forEach((el) => compileExpr(el, ctx));
+        emit(code, OP.ARRAY, e.elems.length);
+        break;
+      case "unary":
+        compileExpr(e.expr, ctx);
+        emit(code, OP.UNOP, e.op);
+        break;
+      case "binop":
+        compileExpr(e.left, ctx);
+        compileExpr(e.right, ctx);
+        emit(code, OP.BINOP, e.op);
+        break;
+      case "index":
+        compileExpr(e.target, ctx);
+        compileExpr(e.index, ctx);
+        emit(code, OP.INDEX);
+        break;
+      case "call": {
+        const callee = functions.get(e.name);
+        if (!callee) throw new KestrelError(`Unknown function '${e.name}'`);
+        e.args.forEach((a) => compileExpr(a, ctx));
+        // Store a direct reference to the callee's record (not just its
+        // name) so the VM never has to do a map lookup per call — every
+        // record already exists at this point (all of them are created
+        // before any body is compiled), it's only .code that fills in later.
+        emit(code, OP.CALL, callee, e.args.length);
+        break;
+      }
+      default:
+        throw new KestrelError(`Cannot compile expression of kind '${e.kind}'`);
+    }
+  }
+
+  function compileStmt(s, ctx) {
+    const { code, slots } = ctx;
+    switch (s.kind) {
+      case "let":
+        compileExpr(s.value, ctx);
+        emit(code, OP.STORE, slots.get(s.name));
+        break;
+      case "assign":
+        if (!slots.has(s.name)) throw new KestrelError(`Assignment to unknown variable '${s.name}'`);
+        compileExpr(s.value, ctx);
+        emit(code, OP.STORE, slots.get(s.name));
+        break;
+      case "if": {
+        compileExpr(s.cond, ctx);
+        const jf = emit(code, OP.JUMP_IF_FALSE, -1);
+        s.thenBlock.forEach((st) => compileStmt(st, ctx));
+        if (s.elseBlock) {
+          const j = emit(code, OP.JUMP, -1);
+          patch(code, jf);
+          s.elseBlock.forEach((st) => compileStmt(st, ctx));
+          patch(code, j);
+        } else {
+          patch(code, jf);
+        }
+        break;
+      }
+      case "while": {
+        const loopStart = code.length;
+        compileExpr(s.cond, ctx);
+        const jf = emit(code, OP.JUMP_IF_FALSE, -1);
+        s.body.forEach((st) => compileStmt(st, ctx));
+        emit(code, OP.JUMP, loopStart);
+        patch(code, jf);
+        break;
+      }
+      case "print":
+        s.args.forEach((a) => compileExpr(a, ctx));
+        emit(code, OP.PRINT, s.args.length);
+        break;
+      case "return":
+        if (s.value) {
+          compileExpr(s.value, ctx);
+          emit(code, OP.RETURN_VALUE);
+        } else {
+          emit(code, OP.RETURN_NULL);
+        }
+        break;
+      case "expr_stmt":
+        compileExpr(s.expr, ctx);
+        emit(code, OP.POP);
+        break;
+      default:
+        throw new KestrelError(`Cannot compile statement of kind '${s.kind}'`);
+    }
+  }
+
+  for (const fn of program) {
+    const cfn = functions.get(fn.name);
+    const ctx = { code: cfn.code, slots: cfn.slots };
+    fn.body.forEach((s) => compileStmt(s, ctx));
+    emit(cfn.code, OP.RETURN_NULL); // falling off the end returns null, same as the tree-walker
+  }
+
+  return functions;
+}
+
+// ============================== BYTECODE VM ==============================
+
+// One array is shared by every frame for the entire run — both operand
+// stack and locals. A call's arguments are already sitting, contiguous,
+// exactly where its locals need to start (the caller just pushed them to
+// evaluate them), so a frame is just a base index into this one array,
+// not a fresh locals array + fresh operand stack allocated per call. That
+// was one big allocation cost recursion paid per call (on top of the
+// megamorphic instruction shapes fixed above) — profiling showed
+// `GrowFastSmiOrObjectElements` from a brand-new `[]` growing on every
+// single call. Locals live at stack[frameBase .. frameBase+slotCount), the
+// operand stack is whatever's pushed above that.
+//
+// A second cost remained even after that fix: a Kestrel function call was
+// still a *real* recursive JavaScript call (this function calling itself),
+// and profiling showed that overhead — not any single instruction — as the
+// dominant cost on call-heavy programs like naive fibonacci, enough to
+// make the VM slower than the tree-walker there despite winning everywhere
+// else. So calls no longer recurse in JS at all: `execute` is one flat
+// loop, and a Kestrel call/return just swaps which function's code/base/ip
+// the loop is currently reading, saving/restoring the caller's own
+// code/base/return-ip on a manually-managed call stack (three parallel
+// arrays + an index, not an array of objects, to avoid allocating a fresh
+// object per call — the same lesson as the instruction-shape fix above).
+function execute(functions, entryName, args, onPrint) {
+  const stack = [];
+  const csCode = [], csBase = [], csIp = [];
+  let csTop = 0;
+
+  const entryFn = functions.get(entryName);
+  if (!entryFn) throw new KestrelError("No 'main' function found");
+  for (const a of args) stack.push(a);
+
+  let frameBase = stack.length - args.length;
+  let code = entryFn.code;
+  let ip = 0;
+  // Extending .length fills any locals beyond the passed-in args with
+  // `undefined`; shrinking it silently drops extra args — both match the
+  // tree-walker's `fn.params.forEach((p,i) => env[p.name]=args[i])`.
+  stack.length = frameBase + entryFn.slotCount;
+
+  for (;;) {
+    const ins = code[ip];
+    switch (ins.op) {
+      case OP.CONST: stack.push(ins.a); ip++; break;
+      case OP.LOAD: stack.push(stack[frameBase + ins.a]); ip++; break;
+      case OP.STORE: stack[frameBase + ins.a] = stack.pop(); ip++; break;
+      case OP.ARRAY: {
+        const arr = stack.splice(stack.length - ins.a, ins.a);
+        stack.push(arr);
+        ip++;
+        break;
+      }
+      case OP.INDEX: {
+        const idx = stack.pop();
+        const arr = stack.pop();
+        if (idx < 0 || idx >= arr.length) {
+          throw new KestrelError(
+            `Index ${idx} out of bounds for array of length ${arr.length}`
+          );
+        }
+        stack.push(arr[idx]);
+        ip++;
+        break;
+      }
+      case OP.UNOP: {
+        const v = stack.pop();
+        stack.push(ins.a === "-" ? -v : !v);
+        ip++;
+        break;
+      }
+      case OP.BINOP: {
+        const r = stack.pop();
+        const l = stack.pop();
+        // Inlined instead of a separate binop() helper: this is the
+        // single hottest instruction in arithmetic-heavy code, and a real
+        // function call per operation was showing up as its own
+        // measurable cost on top of this switch's own dispatch.
+        let result;
+        switch (ins.a) {
+          case "+": result = l + r; break;
+          case "-": result = l - r; break;
+          case "*": result = l * r; break;
+          case "/": result = l / r; break;
+          case "%": result = l % r; break;
+          case "==": result = l === r; break;
+          case "!=": result = l !== r; break;
+          case "<": result = l < r; break;
+          case ">": result = l > r; break;
+          case "<=": result = l <= r; break;
+          case ">=": result = l >= r; break;
+          case "&&": result = l && r; break;
+          case "||": result = l || r; break;
+        }
+        stack.push(result);
+        ip++;
+        break;
+      }
+      case OP.CALL: {
+        const callee = ins.a;
+        const calleeBase = stack.length - ins.b;
+        // Save where to resume in the caller once the callee returns.
+        csCode[csTop] = code;
+        csBase[csTop] = frameBase;
+        csIp[csTop] = ip + 1;
+        csTop++;
+        code = callee.code;
+        frameBase = calleeBase;
+        ip = 0;
+        stack.length = frameBase + callee.slotCount;
+        break;
+      }
+      case OP.PRINT: {
+        const vals = stack.splice(stack.length - ins.a, ins.a);
+        onPrint(vals.join(" "));
+        ip++;
+        break;
+      }
+      case OP.POP: stack.pop(); ip++; break;
+      case OP.JUMP: ip = ins.a; break;
+      case OP.JUMP_IF_FALSE: {
+        const cond = stack.pop();
+        ip = cond ? ip + 1 : ins.a;
+        break;
+      }
+      case OP.RETURN_VALUE: {
+        const value = stack.pop();
+        stack.length = frameBase;
+        if (csTop === 0) return value;
+        stack.push(value);
+        csTop--;
+        code = csCode[csTop];
+        frameBase = csBase[csTop];
+        ip = csIp[csTop];
+        break;
+      }
+      case OP.RETURN_NULL: {
+        stack.length = frameBase;
+        if (csTop === 0) return null;
+        stack.push(null);
+        csTop--;
+        code = csCode[csTop];
+        frameBase = csBase[csTop];
+        ip = csIp[csTop];
+        break;
+      }
+      default:
+        throw new KestrelError(`Cannot execute instruction of kind '${ins.op}'`);
+    }
+  }
+}
+
 // ============================== PUBLIC API ==============================
 
 function run(src, opts = {}) {
@@ -526,8 +857,31 @@ function run(src, opts = {}) {
   return { result, boundsNotes };
 }
 
+// Same language semantics as run(), but compiles to bytecode and executes
+// on the stack-based VM above instead of walking the AST. See
+// kestrel-DESIGN.md for what this backend does and doesn't do yet — it's
+// a faster interpreter, not the persistent-cache/native-codegen backend
+// the design doc describes.
+function runFast(src, opts = {}) {
+  const tokens = lex(src);
+  const program = parse(tokens);
+  const purityErrors = checkPurity(program);
+  if (purityErrors.length) {
+    throw new KestrelError("Purity check failed:\n  " + purityErrors.join("\n  "));
+  }
+  const boundsNotes = checkBounds(program);
+  const functions = compile(program);
+  const onPrint = opts.onPrint || ((s) => console.log(s));
+  const result = execute(functions, "main", [], onPrint);
+  return { result, boundsNotes };
+}
+
 // Export for Node; in the browser this file is loaded as a plain
 // <script>, and `Kestrel` is used as a global instead.
-const Kestrel = { lex, parse, checkPurity, checkBounds, interpret, run, KestrelError };
+const Kestrel = {
+  lex, parse, checkPurity, checkBounds, interpret, run,
+  compile, execute, runFast,
+  KestrelError,
+};
 if (typeof module !== "undefined") module.exports = Kestrel;
 if (typeof window !== "undefined") window.Kestrel = Kestrel;

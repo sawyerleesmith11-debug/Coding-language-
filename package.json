@@ -4,7 +4,7 @@
   "description": "A toy programming language with compile-time purity checking and bounds proofs.",
   "main": "kestrel.js",
   "scripts": {
-    "test": "node --test test/"
+    "test": "node --test test/*.test.js"
   },
   "license": "MIT"
 }
