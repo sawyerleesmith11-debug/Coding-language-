@@ -1,0 +1,10 @@
+{
+  "name": "kestrel",
+  "version": "0.1.0",
+  "description": "A toy programming language with compile-time purity checking and bounds proofs.",
+  "main": "kestrel.js",
+  "scripts": {
+    "test": "node --test test/"
+  },
+  "license": "MIT"
+}

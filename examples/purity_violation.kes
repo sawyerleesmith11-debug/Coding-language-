@@ -1,0 +1,10 @@
+// This one is meant to fail the purity check on purpose —
+// 'oops' is marked pure but calls print, which is an effect.
+pure fn oops(x: i32) -> i32 {
+    print("side effect!");
+    return x;
+}
+
+fn main() {
+    print(oops(1));
+}
