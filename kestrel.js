@@ -811,6 +811,23 @@ function memoKey(args) {
   return JSON.stringify(args.map(canon));
 }
 
+// V8 throws `RangeError: Map maximum size exceeded` once a Map hits its
+// hard internal capacity (2^24 entries) — a hot pure fn called with
+// millions of distinct arguments (see kestrelc's O(n^2) memo bug fixed
+// alongside this) can hit that ceiling and crash a run that would
+// otherwise complete fine. Memoization is a pure optimization, never a
+// correctness requirement, so evicting the oldest entry once a
+// per-function cache reaches MEMO_CACHE_LIMIT (a Map iterates in
+// insertion order, so its first key is the oldest) keeps memory and
+// entry count bounded, well under the hard cap, at the cost of losing
+// some cache hits on functions with more distinct argument values than
+// the limit — still correct, just less of a speedup in that case.
+const MEMO_CACHE_LIMIT = 1_000_000;
+function memoSet(cache, key, value) {
+  if (cache.size >= MEMO_CACHE_LIMIT) cache.delete(cache.keys().next().value);
+  cache.set(key, value);
+}
+
 function interpret(program, { onPrint = (s) => console.log(s) } = {}) {
   const fns = new Map(program.map((f) => [f.name, f]));
   // A `pure fn` can't observe or be affected by any other call to itself
@@ -928,7 +945,7 @@ function interpret(program, { onPrint = (s) => console.log(s) } = {}) {
     fn.params.forEach((p, i) => { env[p.name] = args[i]; });
     const result = execBlock(fn.body, env);
     const value = result instanceof ReturnSignal ? result.value : null;
-    if (cache) cache.set(key, value);
+    if (cache) memoSet(cache, key, value);
     return value;
   }
 
@@ -1337,7 +1354,7 @@ function execute(functions, entryName, args, onPrint) {
       }
       case OP.RETURN_VALUE: {
         const value = stack[sp - 1];
-        if (curFnName !== null) memoCache.get(curFnName).set(curKey, value);
+        if (curFnName !== null) memoSet(memoCache.get(curFnName), curKey, value);
         sp = frameBase;
         if (csTop === 0) return value;
         stack[sp++] = value;
@@ -1350,7 +1367,7 @@ function execute(functions, entryName, args, onPrint) {
         break;
       }
       case OP.RETURN_NULL: {
-        if (curFnName !== null) memoCache.get(curFnName).set(curKey, null);
+        if (curFnName !== null) memoSet(memoCache.get(curFnName), curKey, null);
         sp = frameBase;
         if (csTop === 0) return null;
         stack[sp++] = null;

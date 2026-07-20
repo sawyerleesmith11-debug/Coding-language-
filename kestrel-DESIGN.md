@@ -517,6 +517,19 @@ function with few or no repeated argument values across a run gets no
 benefit and pays a small `JSON.stringify`-per-call cache-key overhead
 instead; this is the best case, not a general multiplier.
 
+**Bug found and fixed:** a pure fn called with well over 16.7 million
+distinct arguments (V8's hard per-`Map` capacity, 2^24 entries) crashed
+both JS backends with `RangeError: Map maximum size exceeded` instead of
+just running slower — the exact opposite of what an optimization should
+ever do. Fixed with `memoSet` (`kestrel.js`): once a per-function cache
+reaches `MEMO_CACHE_LIMIT` (1,000,000 entries), it evicts the oldest key
+before inserting — a `Map` iterates in insertion order, so its first key
+is always the oldest. Memoization is a pure optimization, never a
+correctness requirement, so eviction only costs some cache hits on
+functions with more distinct argument values than the limit; it never
+produces a wrong answer. See `test/kestrel.test.js`'s "pure fn
+memoization" suite for the regression tests (both backends).
+
 **Loop fusion, shipped (JS backends only, narrow shape):** both `run`
 and `runFast` now fuse a chain of `let a = parallel_map(f, arr); let b
 = parallel_map(g, a);` — with `a` used nowhere else in the function —

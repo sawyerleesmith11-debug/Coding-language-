@@ -676,4 +676,32 @@ describe("pure fn memoization", () => {
     `);
     assert.deepEqual(output, ["16", "16", "25"]);
   });
+
+  // A memoized pure fn called with well over a million distinct arguments
+  // used to crash both backends with "RangeError: Map maximum size
+  // exceeded" once the per-function memo Map hit V8's hard 2^24-entry cap
+  // — MEMO_CACHE_LIMIT now evicts the oldest entry once a cache reaches
+  // 1,000,000 entries, so this must complete and stay correct instead of
+  // throwing. 1,200,000 distinct calls guarantees at least one eviction.
+  const memoOverflowSrc = `
+    pure fn square(x: i32) -> i32 { return x * x; }
+    fn main() {
+      let i = 0;
+      let total = 0;
+      while (i < 1200000) {
+        total = (total + square(i)) % 1000000007;
+        i = i + 1;
+      }
+      print(total);
+    }
+  `;
+  test("run() doesn't crash when a memoized pure fn's distinct-argument cache exceeds the eviction limit", () => {
+    const { output } = runCollect(memoOverflowSrc);
+    assert.equal(output.length, 1);
+  });
+  test("runFast() doesn't crash when a memoized pure fn's distinct-argument cache exceeds the eviction limit", () => {
+    const output = [];
+    Kestrel.runFast(memoOverflowSrc, { onPrint: (s) => output.push(s) });
+    assert.equal(output.length, 1);
+  });
 });
