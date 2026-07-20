@@ -353,15 +353,19 @@ underneath it — exactly the `filename:14:7` example this item used to
 describe as future work. `kestrelc`'s CLI and `kestrelc-web` (and so
 `kestrel-editor.html`'s "native (wasm)" engine) use it for real; the
 `run`/`runFast` engines in the editor use it too when a `KestrelError`
-reaches the Run button's error handler. **Scope, honestly:** this only
-covers lex and parse errors, the only two stages that tracked *any*
-source position before this — purity check, type check, and runtime
-errors (unknown identifier, out-of-bounds index, etc.) still report a
-bare message with no location at all, in every backend. Extending
-position-tracking to the rest of the AST (so those stages can report a
-location too) is real, separate future work — it needs a span field on
-every expression/statement node, not just tokens, which is a bigger
-structural change than this first step.
+reaches the Run button's error handler. Purity-check and type-check
+errors (both JS backends) now carry a location too, though a coarser
+one: every statement's line is recorded at parse time and threaded
+through `checkPurity`/`checkTypes`, so a message like `'-' needs a
+number, found bool (line 5)` points at the offending statement — not a
+`file:line:col:` + caret span down to the exact token, since that would
+need a span on every expression node, not just statements, which is
+still real future work. **Scope, honestly:** `kestrelc` (native, via
+Cranelift) doesn't have any of this — its own `purity.rs`/`typecheck.rs`
+still report message-only errors; runtime errors (unknown identifier,
+out-of-bounds index, etc.) in every backend are also still
+message-only, since they're not part of the AST-walking checkers this
+change touched.
 
 **Memoization, shipped (JS backends only):** both `run` and `runFast`
 now cache a `pure fn`'s result by argument value, scoped to a single
@@ -379,9 +383,11 @@ at all yet — this is JS-backends-first, matching the project's usual
 pattern of new semantics landing there before the native compiler.
 
 Not yet implemented (future work, roughly in priority order):
-1. Extending source-position tracking (see above) from lex/parse errors
-   to purity check, type check, and runtime errors — needs a span on
-   every AST node, not just tokens.
+1. Full per-expression position tracking (statement-level line is now
+   in place for purity/type errors, see above) — a `file:line:col:` +
+   caret for those stages too needs a span on every AST node, not just
+   statements. Also: bringing any of this to `kestrelc`'s own checkers,
+   and to runtime errors in every backend.
 2. Pure-function loop fusion, extending idea #2/#4's purity proof the
    same way `parallel_map` (idea #5) already does — turning a chain of
    `pure fn` calls over an array into one pass instead of several.

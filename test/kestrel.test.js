@@ -527,6 +527,34 @@ describe("checkTypes() — first honest type checker", () => {
   });
 });
 
+describe("purity/type errors carry a line number", () => {
+  test("purity violation reports the line of the offending print", () => {
+    assert.throws(
+      () => Kestrel.run(`
+        pure fn oops() -> i32 {
+          print("hi");
+          return 1;
+        }
+        fn main() { oops(); }
+      `),
+      /is marked pure but calls print or an impure function \(line 3\)/
+    );
+  });
+
+  test("a type error reports the line of the offending statement, not just the function", () => {
+    assert.throws(
+      () => Kestrel.run(`
+        fn main() {
+          let x = 1;
+
+          print(5 + true);
+        }
+      `),
+      /needs two numbers, found int and bool \(line 5\)/
+    );
+  });
+});
+
 describe("pure fn memoization", () => {
   // A `pure fn` cannot observe or be affected by any other call to itself
   // (no I/O, no calls to impure fns, no mutation outside its own locals),

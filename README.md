@@ -94,9 +94,10 @@ see `docs/SYNTAX.md`'s "Type checking" section. Compile errors now
 include line, column, and a length too, not just a line number —
 `kestrelc`'s CLI/WASM output and lex/parse errors surfaced through
 `kestrel-editor.html` print `file:line:col: message` with a `^` under
-the offending span. Honest scope: only lex/parse errors carry a
-position so far — purity check, type check, and runtime errors are
-still message-only; see `kestrel-DESIGN.md` for the gap. `pure fn`
+the offending span. Purity-check and type-check errors (JS backends)
+now carry a location too — a statement line, not a full caret span; see
+`kestrel-DESIGN.md` for the exact scope and what's still message-only
+(`kestrelc`'s own checkers, runtime errors everywhere). `pure fn`
 calls are now memoized too, in both JS backends (`run` and `runFast`)
 — a repeated call with identical arguments returns the cached result
 instead of re-executing, scoped to a single run, always safe per the
