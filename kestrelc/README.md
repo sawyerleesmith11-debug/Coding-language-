@@ -116,6 +116,13 @@ Codegen, however, currently supports a subset:
   function body from its call sites' proofs — that fast path is native-only
   for now, so those accesses still get a runtime check there (and trap via
   WASM's `unreachable` instruction instead of `SIGILL`).
+- **`parallel_map(f, arr)`**, with real OS-thread parallelism — see
+  "Parallel map" below. `f` must be a `pure fn` taking exactly one
+  scalar parameter; `arr` must be a fixed-size array *literal*
+  (`let x = [...]`), not a parameter, since the output array's size has
+  to be known at compile time (it's a plain stack allocation). The WASM
+  backend accepts the same programs but runs them sequentially — see
+  below for why.
 
 **Not supported yet — a clear compile error, never a silent miscompile:**
 - Proving a `where` clause from anything other than a literal index and
@@ -125,6 +132,57 @@ Codegen, however, currently supports a subset:
 - Floats with real fractional semantics
 - Indexing/passing anything other than a plain array variable (e.g. the
   result of a function call, or a nested array expression)
+
+## Parallel map
+
+```
+pure fn square(x: i32) -> i32 { return x * x; }
+fn main() {
+    let nums = [1, 2, 3, 4, 5];
+    let squares = parallel_map(square, nums);
+    print(squares[0]);
+}
+```
+
+See `kestrel-DESIGN.md` idea #5 ("fearless parallelism, powered by
+purity") for the full rationale. In short: a `pure fn` can't observe or
+be affected by any other call to itself, so applying it once per array
+element has nothing to race over no matter what order (or how much
+overlap) those calls happen in — purity alone is the safety proof, no
+`unsafe`, no manual audit.
+
+`kestrelc`'s native backend is the only one that actually runs this in
+parallel. It's implemented as a small C shim
+(`runtime/kestrelc_runtime.c`, ~100 lines, linked into every native
+build automatically) rather than hand-rolled Cranelift IR — Cranelift
+has no pthread-aware primitives, and there's no benefit to re-deriving
+`pthread_create`'s calling convention by hand when `cc` already knows
+how to compile straightforward C and link it against libpthread.
+Generated code just calls one function, `kestrelc_parallel_map_i64`,
+the same way it already calls libc's `printf`. That function spawns one
+thread per available CPU core (`sysconf(_SC_NPROCESSORS_ONLN)`), splits
+the array into contiguous chunks, and calls straight back into the
+Cranelift-compiled `pure fn` (via its own address, obtained with
+Cranelift's `func_addr`) from each thread. Below 10,000 elements or on
+a single-core machine, it runs inline instead — thread setup/teardown
+would cost more than it saves.
+
+**Measured** on this machine (4 logical CPUs): a CPU-heavy `pure fn`
+applied to a 20,000-element array via `parallel_map`, external-process/
+best-of-N timed against an equivalent hand-written sequential C loop
+doing the identical work — **~2.1x faster**, consistent across a light
+and a 40x-heavier per-element workload. Honestly below the ideal ~4x
+for 4 cores (thread overhead, memory bandwidth, and likely some
+virtualization/container overhead on this particular machine all play
+a part) — take the multiplier as this-machine-specific, not universal.
+
+`run`/`runFast` (single-threaded JS) and the WASM backend accept the
+exact same `parallel_map` programs and produce identical results, but
+apply `f` sequentially — kestrel.js's sequential version is what the
+native backend's real threaded output is checked against for
+correctness (see `tests/integration.rs`'s large-array test, which
+generates a 20,000-element array to force the real thread-pool path,
+not just the small-array inline fallback).
 
 ## Benchmarks
 

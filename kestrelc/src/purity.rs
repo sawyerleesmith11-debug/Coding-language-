@@ -144,3 +144,112 @@ pub fn check_purity(program: &Program) -> Vec<String> {
     }
     errors
 }
+
+/// `parallel_map(f, arr)` is a reserved builtin call name (like `print`),
+/// not a keyword — see kestrel-DESIGN.md idea #5. Purity is what makes
+/// this safe: a `pure fn` can't observe or be affected by any other call
+/// to itself, so applying it once per array element has nothing to race
+/// over no matter what order (or how much overlap) those calls happen
+/// in. This check runs unconditionally (not just inside `pure fn`
+/// bodies, unlike `check_purity`) since misusing it is a bug regardless
+/// of the caller's own purity. Direct port of kestrel.js's
+/// `checkParallelMap` — same rules, same wording.
+pub fn check_parallel_map(program: &Program) -> Vec<String> {
+    let fns: HashMap<&str, &Fn> = program.iter().map(|f| (f.name.as_str(), f)).collect();
+    let mut errors = Vec::new();
+
+    fn visit_expr(e: &Expr, fns: &HashMap<&str, &Fn>, errors: &mut Vec<String>) {
+        match e {
+            Expr::Call { name, args } if name == "parallel_map" => {
+                if args.len() != 2 {
+                    errors.push(format!(
+                        "parallel_map() takes exactly 2 arguments (a pure function and an array), got {}",
+                        args.len()
+                    ));
+                    return;
+                }
+                match &args[0] {
+                    Expr::Ident(func_name) => match fns.get(func_name.as_str()) {
+                        None => errors.push(format!("parallel_map(): unknown function '{func_name}'")),
+                        Some(callee) if !callee.pure => errors.push(format!(
+                            "parallel_map(): '{func_name}' must be a 'pure fn' — parallel safety comes entirely from the purity proof"
+                        )),
+                        Some(callee) if callee.params.len() != 1 => errors.push(format!(
+                            "parallel_map(): '{func_name}' must take exactly one parameter (one array element in, one result out), has {}",
+                            callee.params.len()
+                        )),
+                        Some(callee) if !matches!(callee.params[0].ty, Type::Named(_)) => errors.push(format!(
+                            "parallel_map(): '{func_name}'s parameter must be a scalar (one array element), not an array"
+                        )),
+                        Some(_) => {}
+                    },
+                    _ => errors.push(
+                        "parallel_map()'s first argument must be a bare function name, not an expression".to_string(),
+                    ),
+                }
+                visit_expr(&args[1], fns, errors);
+            }
+            Expr::Call { args, .. } => {
+                for a in args {
+                    visit_expr(a, fns, errors);
+                }
+            }
+            Expr::Binop { left, right, .. } => {
+                visit_expr(left, fns, errors);
+                visit_expr(right, fns, errors);
+            }
+            Expr::Unary { expr, .. } => visit_expr(expr, fns, errors),
+            Expr::Index { target, index } => {
+                visit_expr(target, fns, errors);
+                visit_expr(index, fns, errors);
+            }
+            Expr::ArrayLit(elems) => {
+                for el in elems {
+                    visit_expr(el, fns, errors);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn visit_stmt(s: &Stmt, fns: &HashMap<&str, &Fn>, errors: &mut Vec<String>) {
+        match s {
+            Stmt::Let { value, .. } | Stmt::Assign { value, .. } => visit_expr(value, fns, errors),
+            Stmt::If { cond, then_block, else_block } => {
+                visit_expr(cond, fns, errors);
+                for st in then_block {
+                    visit_stmt(st, fns, errors);
+                }
+                if let Some(eb) = else_block {
+                    for st in eb {
+                        visit_stmt(st, fns, errors);
+                    }
+                }
+            }
+            Stmt::While { cond, body } => {
+                visit_expr(cond, fns, errors);
+                for st in body {
+                    visit_stmt(st, fns, errors);
+                }
+            }
+            Stmt::Print { args } => {
+                for a in args {
+                    visit_expr(a, fns, errors);
+                }
+            }
+            Stmt::Return { value } => {
+                if let Some(v) = value {
+                    visit_expr(v, fns, errors);
+                }
+            }
+            Stmt::ExprStmt { expr } => visit_expr(expr, fns, errors),
+        }
+    }
+
+    for fn_ in program {
+        for s in &fn_.body {
+            visit_stmt(s, &fns, &mut errors);
+        }
+    }
+    errors
+}

@@ -152,9 +152,25 @@ enum VarLoc {
     Array { ptr: u32, len: u32, literal_len: Option<u32> },
 }
 
-fn slot_kind_for_let(value: &Expr) -> SlotKind {
+// `known_lens` is every literal-length array slot seen *so far* in this
+// same pass (params first, then `let`s in occurrence order) — needed to
+// classify `let out = parallel_map(f, arr);` as an array slot with the
+// same length as `arr`, without a separate type-checking pass. Only
+// works when `arr` is itself a literal-length array (an earlier `let`
+// with an array-literal value); an array *parameter* has no
+// compile-time-known length, so parallel_map over one isn't supported
+// yet (rejected with a clear error at codegen time, once `resolve_array`
+// runs — see `gen_binding`'s parallel_map arm).
+fn slot_kind_for_let(value: &Expr, known_lens: &HashMap<String, u32>) -> SlotKind {
     match value {
         Expr::ArrayLit(elems) => SlotKind::Array { literal_len: Some(elems.len() as u32) },
+        Expr::Call { name, args } if name == "parallel_map" && args.len() == 2 => {
+            let len = match &args[1] {
+                Expr::Ident(arr_name) => known_lens.get(arr_name).copied(),
+                _ => None,
+            };
+            SlotKind::Array { literal_len: len }
+        }
         _ => SlotKind::Scalar,
     }
 }
@@ -173,17 +189,28 @@ fn add_slot(name: &str, kind: SlotKind, slots: &mut Vec<(String, SlotKind)>, see
     }
 }
 
-fn walk_slots(stmts: &[Stmt], slots: &mut Vec<(String, SlotKind)>, seen: &mut HashMap<String, ()>) {
+fn walk_slots(
+    stmts: &[Stmt],
+    slots: &mut Vec<(String, SlotKind)>,
+    seen: &mut HashMap<String, ()>,
+    known_lens: &mut HashMap<String, u32>,
+) {
     for s in stmts {
         match s {
-            Stmt::Let { name, value } => add_slot(name, slot_kind_for_let(value), slots, seen),
+            Stmt::Let { name, value } => {
+                let kind = slot_kind_for_let(value, known_lens);
+                if let SlotKind::Array { literal_len: Some(l) } = kind {
+                    known_lens.insert(name.clone(), l);
+                }
+                add_slot(name, kind, slots, seen);
+            }
             Stmt::If { then_block, else_block, .. } => {
-                walk_slots(then_block, slots, seen);
+                walk_slots(then_block, slots, seen, known_lens);
                 if let Some(eb) = else_block {
-                    walk_slots(eb, slots, seen);
+                    walk_slots(eb, slots, seen, known_lens);
                 }
             }
-            Stmt::While { body, .. } => walk_slots(body, slots, seen),
+            Stmt::While { body, .. } => walk_slots(body, slots, seen, known_lens),
             _ => {}
         }
     }
@@ -192,10 +219,11 @@ fn walk_slots(stmts: &[Stmt], slots: &mut Vec<(String, SlotKind)>, seen: &mut Ha
 fn collect_slots(f: &Fn) -> Vec<(String, SlotKind)> {
     let mut slots: Vec<(String, SlotKind)> = Vec::new();
     let mut seen: HashMap<String, ()> = HashMap::new();
+    let mut known_lens: HashMap<String, u32> = HashMap::new();
     for p in &f.params {
         add_slot(&p.name, slot_kind_for_param(&p.ty), &mut slots, &mut seen);
     }
-    walk_slots(&f.body, &mut slots, &mut seen);
+    walk_slots(&f.body, &mut slots, &mut seen, &mut known_lens);
     slots
 }
 
@@ -306,6 +334,86 @@ impl<'a> FnWasm<'a> {
                     self.func.instructions().i64_store(MemArg { offset: (i * 8) as u64, align: 3, memory_index: 0 });
                 }
                 self.func.instructions().i32_const(elems.len() as i32);
+                self.func.instructions().local_set(len);
+                Ok(())
+            }
+            (VarLoc::Array { ptr, len, literal_len }, Expr::Call { name: call_name, args }) if call_name == "parallel_map" => {
+                let (ptr, len) = (*ptr, *len);
+                let func_name = match &args[0] {
+                    Expr::Ident(n) => n.clone(),
+                    _ => return Err(WasmError(
+                        "parallel_map()'s first argument must be a bare function name".into(),
+                    )),
+                };
+                let callee_idx = *self
+                    .fn_indices
+                    .get(&func_name)
+                    .ok_or_else(|| WasmError(format!("Unknown function '{func_name}'")))?;
+                let elem_count = self.static_array_len(&args[1]).ok_or_else(|| WasmError(
+                    "kestrelc's WASM backend only supports parallel_map over a fixed-size array literal (`let x = [...]`) so far, not an array parameter".into(),
+                ))?;
+                let expected = literal_len.expect("array let-bindings always have a literal_len");
+                if elem_count != expected {
+                    return Err(WasmError(format!(
+                        "kestrelc: array variable '{name}' rebound with a different length ({elem_count} vs {expected}) — not supported"
+                    )));
+                }
+                let (in_ptr, _in_len) = self.resolve_array(&args[1])?;
+                let size_bytes = elem_count * 8;
+
+                // out = $bump; $bump += size_bytes
+                self.func.instructions().global_get(BUMP_GLOBAL);
+                self.func.instructions().local_set(ptr);
+                self.func.instructions().global_get(BUMP_GLOBAL);
+                self.func.instructions().i32_const(size_bytes as i32);
+                self.func.instructions().i32_add();
+                self.func.instructions().global_set(BUMP_GLOBAL);
+
+                // Sequential loop — this backend has no threads (WASM's
+                // threads proposal needs SharedArrayBuffer + a Worker per
+                // thread, well out of scope here). Real parallelism is
+                // kestrelc's native backend only; see kestrelc-web/README.md.
+                // for (i = 0; i < elem_count; i++) out[i] = f(in[i]);
+                let idx = self.scratch;
+                self.func.instructions().i32_const(0);
+                self.func.instructions().local_set(idx);
+                self.func.instructions().block(wasm_encoder::BlockType::Empty);
+                self.func.instructions().loop_(wasm_encoder::BlockType::Empty);
+                self.func.instructions().local_get(idx);
+                self.func.instructions().i32_const(elem_count as i32);
+                self.func.instructions().i32_ge_s();
+                self.func.instructions().br_if(1); // i >= elem_count -> break
+
+                // dest_addr = out_ptr + i*8
+                self.func.instructions().local_get(ptr);
+                self.func.instructions().local_get(idx);
+                self.func.instructions().i32_const(3);
+                self.func.instructions().i32_shl();
+                self.func.instructions().i32_add();
+
+                // f(in[i])
+                self.func.instructions().local_get(in_ptr);
+                self.func.instructions().local_get(idx);
+                self.func.instructions().i32_const(3);
+                self.func.instructions().i32_shl();
+                self.func.instructions().i32_add();
+                self.func.instructions().i64_load(MemArg { offset: 0, align: 3, memory_index: 0 });
+                self.func.instructions().call(callee_idx);
+
+                // out[i] = <call result>  (address was pushed before the
+                // call above and is untouched by it — call only consumes
+                // its own i64 argument/result off the top of the stack)
+                self.func.instructions().i64_store(MemArg { offset: 0, align: 3, memory_index: 0 });
+
+                self.func.instructions().local_get(idx);
+                self.func.instructions().i32_const(1);
+                self.func.instructions().i32_add();
+                self.func.instructions().local_set(idx);
+                self.func.instructions().br(0);
+                self.func.instructions().end(); // end loop
+                self.func.instructions().end(); // end block
+
+                self.func.instructions().i32_const(elem_count as i32);
                 self.func.instructions().local_set(len);
                 Ok(())
             }

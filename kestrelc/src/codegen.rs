@@ -28,6 +28,7 @@ pub struct Codegen {
     module: ObjectModule,
     fn_ids: HashMap<String, FuncId>,
     printf_id: FuncId,
+    pmap_id: FuncId,
     str_cache: HashMap<String, StrConst>,
     str_counter: usize,
     where_info: HashMap<String, WhereInfo>,
@@ -106,10 +107,27 @@ impl Codegen {
             .declare_function("printf", Linkage::Import, &printf_sig)
             .map_err(|e| CodegenError(e.to_string()))?;
 
+        // kestrelc_parallel_map_i64(in: i64 ptr, len: i64, f: i64 fn ptr,
+        // out: i64 ptr) -> () — the real thread-parallel implementation of
+        // `parallel_map`, defined in runtime/kestrelc_runtime.c and linked
+        // in by `link_and_report` alongside every native build. Every
+        // argument here is a plain 8-byte value on the System V ABI
+        // (pointers and i64s alike), so this is exactly as simple to
+        // declare as `printf` above.
+        let mut pmap_sig = Signature::new(CallConv::SystemV);
+        pmap_sig.params.push(AbiParam::new(types::I64)); // in ptr
+        pmap_sig.params.push(AbiParam::new(types::I64)); // len
+        pmap_sig.params.push(AbiParam::new(types::I64)); // f (function pointer)
+        pmap_sig.params.push(AbiParam::new(types::I64)); // out ptr
+        let pmap_id = module
+            .declare_function("kestrelc_parallel_map_i64", Linkage::Import, &pmap_sig)
+            .map_err(|e| CodegenError(e.to_string()))?;
+
         Ok(Codegen {
             module,
             fn_ids: HashMap::new(),
             printf_id,
+            pmap_id,
             str_cache: HashMap::new(),
             str_counter: 0,
             where_info: HashMap::new(),
@@ -216,6 +234,7 @@ impl Codegen {
                 vars,
                 fn_ids: &self.fn_ids,
                 printf_id: self.printf_id,
+                pmap_id: self.pmap_id,
                 module: &mut self.module,
                 str_cache: &mut self.str_cache,
                 str_counter: &mut self.str_counter,
@@ -269,9 +288,25 @@ enum Slot {
     Array { ptr: Variable, len: Variable, literal_len: Option<usize> },
 }
 
-fn slot_kind_for_let(value: &Expr) -> SlotKind {
+// `known_lens` is every literal-length array slot seen *so far* in this
+// same pass (params first, then `let`s in occurrence order) — needed to
+// classify `let out = parallel_map(f, arr);` as an array slot with the
+// same length as `arr`, without a separate type-checking pass. Only
+// works when `arr` is itself a literal-length array (an earlier `let`
+// with an array-literal value); an array *parameter* has no
+// compile-time-known length, so parallel_map over one isn't supported
+// yet (rejected with a clear error at codegen time, once `resolve_array`
+// runs — see `gen_binding`'s parallel_map arm).
+fn slot_kind_for_let(value: &Expr, known_lens: &HashMap<String, usize>) -> SlotKind {
     match value {
         Expr::ArrayLit(elems) => SlotKind::Array { literal_len: Some(elems.len()) },
+        Expr::Call { name, args } if name == "parallel_map" && args.len() == 2 => {
+            let len = match &args[1] {
+                Expr::Ident(arr_name) => known_lens.get(arr_name).copied(),
+                _ => None,
+            };
+            SlotKind::Array { literal_len: len }
+        }
         _ => SlotKind::Scalar,
     }
 }
@@ -295,17 +330,28 @@ fn add_slot(
     }
 }
 
-fn walk_slots(stmts: &[Stmt], slots: &mut Vec<(String, SlotKind)>, seen: &mut HashMap<String, ()>) {
+fn walk_slots(
+    stmts: &[Stmt],
+    slots: &mut Vec<(String, SlotKind)>,
+    seen: &mut HashMap<String, ()>,
+    known_lens: &mut HashMap<String, usize>,
+) {
     for s in stmts {
         match s {
-            Stmt::Let { name, value } => add_slot(name, slot_kind_for_let(value), slots, seen),
+            Stmt::Let { name, value } => {
+                let kind = slot_kind_for_let(value, known_lens);
+                if let SlotKind::Array { literal_len: Some(l) } = kind {
+                    known_lens.insert(name.clone(), l);
+                }
+                add_slot(name, kind, slots, seen);
+            }
             Stmt::If { then_block, else_block, .. } => {
-                walk_slots(then_block, slots, seen);
+                walk_slots(then_block, slots, seen, known_lens);
                 if let Some(eb) = else_block {
-                    walk_slots(eb, slots, seen);
+                    walk_slots(eb, slots, seen, known_lens);
                 }
             }
-            Stmt::While { body, .. } => walk_slots(body, slots, seen),
+            Stmt::While { body, .. } => walk_slots(body, slots, seen, known_lens),
             _ => {}
         }
     }
@@ -314,10 +360,11 @@ fn walk_slots(stmts: &[Stmt], slots: &mut Vec<(String, SlotKind)>, seen: &mut Ha
 fn collect_slots(f: &Fn) -> Vec<(String, SlotKind)> {
     let mut slots: Vec<(String, SlotKind)> = Vec::new();
     let mut seen: HashMap<String, ()> = HashMap::new();
+    let mut known_lens: HashMap<String, usize> = HashMap::new();
     for p in &f.params {
         add_slot(&p.name, slot_kind_for_param(&p.ty), &mut slots, &mut seen);
     }
-    walk_slots(&f.body, &mut slots, &mut seen);
+    walk_slots(&f.body, &mut slots, &mut seen, &mut known_lens);
     slots
 }
 
@@ -326,6 +373,7 @@ struct FnCodegen<'a> {
     vars: HashMap<String, Slot>,
     fn_ids: &'a HashMap<String, FuncId>,
     printf_id: FuncId,
+    pmap_id: FuncId,
     module: &'a mut ObjectModule,
     str_cache: &'a mut HashMap<String, StrConst>,
     str_counter: &'a mut usize,
@@ -387,6 +435,58 @@ impl<'a> FnCodegen<'a> {
                 }
                 let len_val = self.builder.ins().iconst(types::I64, elems.len() as i64);
                 self.builder.def_var(ptr, base);
+                self.builder.def_var(len, len_val);
+                Ok(())
+            }
+            (Slot::Array { ptr, len, literal_len }, Expr::Call { name: call_name, args }) if call_name == "parallel_map" => {
+                let (ptr, len) = (*ptr, *len);
+                let func_name = match &args[0] {
+                    Expr::Ident(n) => n.clone(),
+                    _ => {
+                        return Err(CodegenError(
+                            "parallel_map()'s first argument must be a bare function name".into(),
+                        ))
+                    }
+                };
+                let callee_id = *self
+                    .fn_ids
+                    .get(&func_name)
+                    .ok_or_else(|| CodegenError(format!("Unknown function '{func_name}'")))?;
+                let elem_count = self.static_array_len(&args[1]).ok_or_else(|| {
+                    CodegenError(
+                        "kestrelc only supports parallel_map over a fixed-size array literal (`let x = [...]`) so far, not an array parameter".into(),
+                    )
+                })?;
+                let expected = literal_len.expect("array let-bindings always have a literal_len");
+                if elem_count != expected {
+                    return Err(CodegenError(format!(
+                        "kestrelc: array variable '{name}' rebound with a different length ({elem_count} vs {expected}) — not supported"
+                    )));
+                }
+                let (in_ptr, _in_len) = self.resolve_array(&args[1])?;
+
+                let size_bytes = (elem_count * 8) as u32;
+                let out_slot = self.builder.create_sized_stack_slot(StackSlotData::new(
+                    StackSlotKind::ExplicitSlot,
+                    size_bytes,
+                    3,
+                ));
+                let out_base = self.builder.ins().stack_addr(types::I64, out_slot, 0);
+
+                // The callee's own machine-code address, as a plain i64
+                // value — this is what the C runtime shim
+                // (kestrelc_parallel_map_i64) calls back into from
+                // worker threads, once per array element. Safe because
+                // parallel_map only accepts a `pure fn`: no shared
+                // mutable state for concurrent calls to race over.
+                let local_callee = self.module.declare_func_in_func(callee_id, self.builder.func);
+                let func_addr = self.builder.ins().func_addr(types::I64, local_callee);
+
+                let len_val = self.builder.ins().iconst(types::I64, elem_count as i64);
+                let local_pmap = self.module.declare_func_in_func(self.pmap_id, self.builder.func);
+                self.builder.ins().call(local_pmap, &[in_ptr, len_val, func_addr, out_base]);
+
+                self.builder.def_var(ptr, out_base);
                 self.builder.def_var(len, len_val);
                 Ok(())
             }

@@ -24,6 +24,11 @@ pub fn compile_to_wasm_bytes(src: &str) -> Result<Vec<u8>, String> {
         return Err(format!("Purity check failed:\n  {}", purity_errors.join("\n  ")));
     }
 
+    let pmap_errors = purity::check_parallel_map(&program);
+    if !pmap_errors.is_empty() {
+        return Err(format!("parallel_map() check failed:\n  {}", pmap_errors.join("\n  ")));
+    }
+
     if !program.iter().any(|f| f.name == "main") {
         return Err("No 'main' function found".to_string());
     }

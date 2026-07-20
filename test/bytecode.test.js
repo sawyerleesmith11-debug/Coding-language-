@@ -90,6 +90,17 @@ describe("runFast() equivalence with run()", () => {
     assert.throws(() => Kestrel.run("fn main() { let a = [1]; return a[9]; }"), /out of bounds/);
   });
 
+  test("parallel_map applies a pure function element-wise, both backends agree", () => {
+    assertEquivalent(`
+      pure fn square(x: i32) -> i32 { return x * x; }
+      fn main() {
+        let nums = [1, 2, 3, 4, 5];
+        let squares = parallel_map(square, nums);
+        print(squares[0], squares[1], squares[2], squares[3], squares[4]);
+      }
+    `);
+  });
+
   test("a `let` inside an if-branch stays visible after it (flat scope)", () => {
     // Regression check for the VM's slot allocation: Kestrel has no block
     // scoping, so a `let` declared inside an `if` must still be readable

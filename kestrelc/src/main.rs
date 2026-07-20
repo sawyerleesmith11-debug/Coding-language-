@@ -72,6 +72,15 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
+    let pmap_errors = purity::check_parallel_map(&program);
+    if !pmap_errors.is_empty() {
+        eprintln!("kestrelc: parallel_map() check failed:");
+        for e in &pmap_errors {
+            eprintln!("  {e}");
+        }
+        return ExitCode::FAILURE;
+    }
+
     if !program.iter().any(|f| f.name == "main") {
         eprintln!("kestrelc: No 'main' function found");
         return ExitCode::FAILURE;
@@ -111,22 +120,44 @@ fn main() -> ExitCode {
     link_and_report(&object_bytes, &stem, false)
 }
 
-/// Writes `object_bytes` to `<stem>.o` and links it into `<stem>` with
-/// the system `cc`. Shared by the normal compile path and the
-/// cache-hit path (which skips straight here with a previously-cached
-/// object file) — linking is cheap enough, and simple enough as "just
-/// invoke the system linker," that it isn't itself worth caching
-/// separately from the object file.
+// Embedded at compile time so kestrelc is still a single self-contained
+// binary — no separate runtime file to ship or lose track of. Written
+// out fresh next to the object file on every native link (a handful of
+// lines, negligible cost) rather than built once and cached, keeping
+// `link_and_report` a single straightforward `cc` invocation.
+const RUNTIME_C_SRC: &str = include_str!("../runtime/kestrelc_runtime.c");
+
+/// Writes `object_bytes` to `<stem>.o` and links it, together with
+/// kestrelc's small C runtime shim (real thread-parallel `parallel_map`
+/// support — see `runtime/kestrelc_runtime.c`), into `<stem>` with the
+/// system `cc`. Shared by the normal compile path and the cache-hit path
+/// (which skips straight here with a previously-cached object file) —
+/// linking is cheap enough, and simple enough as "just invoke the system
+/// linker," that it isn't itself worth caching separately from the
+/// object file. The runtime shim is linked in unconditionally, whether
+/// or not the program actually uses parallel_map — it's a handful of
+/// instructions otherwise, not worth a second linker pass to avoid.
 fn link_and_report(object_bytes: &[u8], stem: &str, from_cache: bool) -> ExitCode {
     let obj_path = format!("{stem}.o");
     let out_path = stem.to_string();
+    let runtime_path = "kestrelc_runtime.c";
 
     if let Err(e) = fs::write(&obj_path, object_bytes) {
         eprintln!("kestrelc: failed to write '{obj_path}': {e}");
         return ExitCode::FAILURE;
     }
+    if let Err(e) = fs::write(runtime_path, RUNTIME_C_SRC) {
+        eprintln!("kestrelc: failed to write '{runtime_path}': {e}");
+        return ExitCode::FAILURE;
+    }
 
-    let link_status = Command::new("cc").arg(&obj_path).arg("-o").arg(&out_path).status();
+    let link_status = Command::new("cc")
+        .arg(&obj_path)
+        .arg(runtime_path)
+        .arg("-lpthread")
+        .arg("-o")
+        .arg(&out_path)
+        .status();
 
     match link_status {
         Ok(status) if status.success() => {

@@ -1,9 +1,11 @@
 # Kestrel
 
 A toy programming language focused on speed: compile-time purity
-checking, compile-time bounds proofs, and (per the design doc) a
-persistent cross-run optimization cache and layout polymorphism still
-to come. "Kestrel" is a placeholder name.
+checking, compile-time bounds proofs, a real native compiler with a
+persistent compile cache, and — powered entirely by the purity proof —
+real multi-threaded `parallel_map`. Layout polymorphism and a more
+general proof system are still to come; see the design doc for the
+honest status of every idea. "Kestrel" is a placeholder name.
 
 See [`kestrel-DESIGN.md`](./kestrel-DESIGN.md) for the full design
 rationale and status of each idea, and [`docs/SYNTAX.md`](./docs/SYNTAX.md)
@@ -20,7 +22,9 @@ for the syntax reference and grammar.
   `kestrel.js`; supports a subset of the language so far (see
   `kestrelc/README.md`) but already lands within a few multiples of
   hand-written Rust/C++ on what it does support. Also has a WASM backend
-  (`kestrelc --wasm`).
+  (`kestrelc --wasm`), a persistent on-disk compile cache, and real
+  OS-thread parallelism for `parallel_map(f, arr)` (`runtime/` — a small
+  C shim linked into every native build).
 - `kestrelc-web/` — `kestrelc` itself, compiled to WASM, so it can run
   *inside* the browser editor and compile Kestrel source to a runnable
   `.wasm` module client-side — no server, no native binary. See
@@ -76,7 +80,12 @@ no server or native binary required — pick "engine: native (wasm)", now
 with array support there too. `kestrelc` also has a persistent,
 cross-invocation compile cache now (skips redundant recompilation of
 unchanged source — see `kestrelc/README.md`), though not yet the fuller
-runtime-profile-guided version `kestrel-DESIGN.md` describes. Next up,
-in priority order: that fuller profile-guided cache, layout
-polymorphism, a more general proof system, and CPU parallelism for
-`pure` functions.
+runtime-profile-guided version `kestrel-DESIGN.md` describes. And
+`parallel_map(f, arr)` now gives `pure fn`s real multi-threaded
+execution in `kestrelc`'s native backend — ~2.1x faster than sequential
+on this machine, purity alone as the safety proof, no `unsafe` — while
+every other backend (`run`, `runFast`, and the WASM backend) accepts
+the same programs and runs them sequentially, correctly, just not in
+parallel. Next up, in priority order: that fuller profile-guided cache,
+layout polymorphism (blocked on structs, which don't exist yet), and a
+more general proof system.
