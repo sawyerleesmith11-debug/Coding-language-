@@ -4,9 +4,12 @@
 use crate::ast::*;
 use crate::lexer::{Tok, Token};
 
+#[derive(Debug)]
 pub struct ParseError {
     pub message: String,
     pub line: usize,
+    pub col: usize,
+    pub len: usize,
 }
 
 pub struct Parser {
@@ -44,6 +47,8 @@ impl Parser {
             Err(ParseError {
                 message: format!("Expected '{:?}' but found '{:?}'", tok, self.peek().tok),
                 line: self.peek().line,
+                col: self.peek().col,
+                len: self.peek().len,
             })
         }
     }
@@ -58,6 +63,8 @@ impl Parser {
             other => Err(ParseError {
                 message: format!("Expected identifier but found '{:?}'", other),
                 line: self.peek().line,
+                col: self.peek().col,
+                len: self.peek().len,
             }),
         }
     }
@@ -163,6 +170,8 @@ impl Parser {
             other => Err(ParseError {
                 message: format!("Unexpected token '{:?}'", other),
                 line: t.line,
+                col: t.col,
+                len: t.len,
             }),
         }
     }
@@ -371,4 +380,31 @@ impl Parser {
 
 pub fn parse(tokens: Vec<Token>) -> PResult<Program> {
     Parser::new(tokens).parse_program()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexer::lex;
+
+    #[test]
+    fn missing_semicolon_error_points_at_the_next_token() {
+        // "return x" with no ';' — the parser reports the token it found
+        // instead ('}'), at that token's own line/column.
+        let src = "fn f() -> i32 {\n    return 5\n}\n";
+        let tokens = lex(src).unwrap();
+        let err = parse(tokens).unwrap_err();
+        assert_eq!(err.line, 3);
+        assert_eq!(err.col, 1); // the '}' that closes the function
+        assert_eq!(err.len, 1);
+    }
+
+    #[test]
+    fn unexpected_token_error_carries_the_bad_token_s_span() {
+        let tokens = lex("fn main() { let x = ; }").unwrap();
+        let err = parse(tokens).unwrap_err();
+        assert_eq!(err.line, 1);
+        assert_eq!(err.col, 21); // the ';' where an expression was expected
+        assert_eq!(err.len, 1);
+    }
 }

@@ -51,6 +51,27 @@ system `cc` as the linker. Requires a working C toolchain (`cc`) on
 `PATH` — nothing else; Cranelift itself is a pure-Rust dependency with
 no system requirements beyond that.
 
+## Error diagnostics
+
+Lex and parse errors — the two stages that track a source position —
+are reported as `file:line:col: message`, followed by the offending
+source line and a `^` span underneath it, e.g.:
+
+```
+kestrelc: fib.kes:3:12: Unexpected token 'RParen'
+  return x +;
+           ^
+```
+
+`format_diagnostic` (`src/lib.rs`) is the single formatter behind this,
+shared by the CLI (`main.rs`) and `compile_to_wasm_bytes` (and so
+`kestrelc-web`/`kestrel-editor.html`'s "native (wasm)" engine). Honest
+scope: purity check, type check, and codegen errors don't carry a
+source position yet — only the lexer and parser attach one to a token,
+so those are the only stages this can point at. See
+`kestrel-DESIGN.md`'s roadmap for the (real, separate) work needed to
+extend this to the rest of the compiler.
+
 ## Compile cache
 
 `kestrelc` caches its output across invocations, keyed by a content hash

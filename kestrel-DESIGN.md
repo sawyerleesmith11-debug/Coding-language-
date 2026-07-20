@@ -342,11 +342,31 @@ what Kestrel's built-in types actually are first, a bigger design step
 than this. See `docs/SYNTAX.md`'s "Type checking" section for the exact
 rules and worked examples.
 
+**Compile error locations now include line, column, and a length — a
+first, honestly-scoped version.** Both front ends (`kestrel.js`'s
+lexer/parser and `kestrelc`'s) tracked only a line number before; now
+every token carries its starting column and character length, and a
+shared formatter (`formatKestrelError` in `kestrel.js`,
+`format_diagnostic` in `kestrelc/src/lib.rs`) renders `file:line:col:
+message` followed by the offending source line and a `^` span
+underneath it — exactly the `filename:14:7` example this item used to
+describe as future work. `kestrelc`'s CLI and `kestrelc-web` (and so
+`kestrel-editor.html`'s "native (wasm)" engine) use it for real; the
+`run`/`runFast` engines in the editor use it too when a `KestrelError`
+reaches the Run button's error handler. **Scope, honestly:** this only
+covers lex and parse errors, the only two stages that tracked *any*
+source position before this — purity check, type check, and runtime
+errors (unknown identifier, out-of-bounds index, etc.) still report a
+bare message with no location at all, in every backend. Extending
+position-tracking to the rest of the AST (so those stages can report a
+location too) is real, separate future work — it needs a span field on
+every expression/statement node, not just tokens, which is a bigger
+structural change than this first step.
+
 Not yet implemented (future work, roughly in priority order):
-1. Better compile error locations — line *and* column *and* a length,
-   not just a line number, so an error can point at exactly the
-   offending span (`filename:14:7`, with a `^` under the bad token)
-   instead of just naming the line.
+1. Extending source-position tracking (see above) from lex/parse errors
+   to purity check, type check, and runtime errors — needs a span on
+   every AST node, not just tokens.
 2. Pure-function loop fusion and automatic memoization, extending idea
    #2/#4's purity proof the same way `parallel_map` (idea #5) already
    does — e.g. turning a chain of `pure fn` calls over an array into
