@@ -16,6 +16,7 @@
 // same wording.
 
 use crate::ast::*;
+use crate::span::Span;
 use std::collections::HashMap;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -67,19 +68,19 @@ pub fn check_types(program: &Program) -> Vec<CheckError> {
         }
     }
 
-    // `pos` is the enclosing statement's line/col (see ast.rs's
-    // CheckError doc comment) — every error found anywhere inside one
-    // statement's expression tree points at that statement, not the
-    // exact sub-expression.
+    // `span` is the enclosing statement's span (see ast.rs's CheckError
+    // doc comment) — every error found anywhere inside one statement's
+    // expression tree points at that statement, not the exact
+    // sub-expression.
     fn infer_expr(
         e: &Expr,
         locals: &HashMap<String, Kind>,
         fns: &HashMap<&str, &Fn>,
-        pos: (usize, usize),
+        span: Span,
         errors: &mut Vec<CheckError>,
     ) -> Kind {
         let push = |errors: &mut Vec<CheckError>, message: String| {
-            errors.push(CheckError { message, line: pos.0, col: pos.1 });
+            errors.push(CheckError { message, span });
         };
         match e {
             Expr::Num(_) => Kind::Int,
@@ -88,20 +89,20 @@ pub fn check_types(program: &Program) -> Vec<CheckError> {
             Expr::Ident(name) => locals.get(name).copied().unwrap_or(Kind::Unknown),
             Expr::ArrayLit(elems) => {
                 for el in elems {
-                    infer_expr(el, locals, fns, pos, errors);
+                    infer_expr(el, locals, fns, span, errors);
                 }
                 Kind::Array
             }
             Expr::Index { target, index } => {
-                infer_expr(target, locals, fns, pos, errors);
-                let idx_kind = infer_expr(index, locals, fns, pos, errors);
+                infer_expr(target, locals, fns, span, errors);
+                let idx_kind = infer_expr(index, locals, fns, span, errors);
                 if idx_kind != Kind::Unknown && idx_kind != Kind::Int {
                     push(errors, format!("array index must be a number, found {}", idx_kind.name()));
                 }
                 Kind::Int // Kestrel arrays are integer-valued so far
             }
             Expr::Unary { op, expr } => {
-                let k = infer_expr(expr, locals, fns, pos, errors);
+                let k = infer_expr(expr, locals, fns, span, errors);
                 match op {
                     UnOp::Neg => {
                         if k != Kind::Unknown && k != Kind::Int {
@@ -118,8 +119,8 @@ pub fn check_types(program: &Program) -> Vec<CheckError> {
                 }
             }
             Expr::Binop { op, left, right } => {
-                let l = infer_expr(left, locals, fns, pos, errors);
-                let r = infer_expr(right, locals, fns, pos, errors);
+                let l = infer_expr(left, locals, fns, span, errors);
+                let r = infer_expr(right, locals, fns, span, errors);
                 let sym = op_symbol(*op);
                 match op {
                     BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
@@ -152,7 +153,7 @@ pub fn check_types(program: &Program) -> Vec<CheckError> {
                 if name == "parallel_map" {
                     // Already validated by check_parallel_map; just infer the array arg.
                     if args.len() == 2 {
-                        infer_expr(&args[1], locals, fns, pos, errors);
+                        infer_expr(&args[1], locals, fns, span, errors);
                     }
                     return Kind::Array;
                 }
@@ -167,7 +168,7 @@ pub fn check_types(program: &Program) -> Vec<CheckError> {
                     }
                 }
                 for a in args {
-                    infer_expr(a, locals, fns, pos, errors);
+                    infer_expr(a, locals, fns, span, errors);
                 }
                 Kind::Unknown // return kind isn't tracked yet
             }
@@ -176,12 +177,12 @@ pub fn check_types(program: &Program) -> Vec<CheckError> {
 
     fn visit_stmt(s: &Stmt, locals: &mut HashMap<String, Kind>, fns: &HashMap<&str, &Fn>, errors: &mut Vec<CheckError>) {
         match s {
-            Stmt::Let { name, value, line, col } => {
-                let k = infer_expr(value, locals, fns, (*line, *col), errors);
+            Stmt::Let { name, value, span } => {
+                let k = infer_expr(value, locals, fns, *span, errors);
                 locals.entry(name.clone()).or_insert(k);
             }
-            Stmt::Assign { name, value, line, col } => {
-                let k = infer_expr(value, locals, fns, (*line, *col), errors);
+            Stmt::Assign { name, value, span } => {
+                let k = infer_expr(value, locals, fns, *span, errors);
                 if let Some(&prior) = locals.get(name) {
                     if prior != Kind::Unknown && k != Kind::Unknown && prior != k {
                         errors.push(CheckError {
@@ -190,19 +191,17 @@ pub fn check_types(program: &Program) -> Vec<CheckError> {
                                 prior.name(),
                                 k.name()
                             ),
-                            line: *line,
-                            col: *col,
+                            span: *span,
                         });
                     }
                 }
             }
-            Stmt::If { cond, then_block, else_block, line, col } => {
-                let k = infer_expr(cond, locals, fns, (*line, *col), errors);
+            Stmt::If { cond, then_block, else_block, span } => {
+                let k = infer_expr(cond, locals, fns, *span, errors);
                 if k != Kind::Unknown && k != Kind::Bool {
                     errors.push(CheckError {
                         message: format!("if-condition must be a boolean expression, found {}", k.name()),
-                        line: *line,
-                        col: *col,
+                        span: *span,
                     });
                 }
                 for st in then_block {
@@ -214,31 +213,30 @@ pub fn check_types(program: &Program) -> Vec<CheckError> {
                     }
                 }
             }
-            Stmt::While { cond, body, line, col } => {
-                let k = infer_expr(cond, locals, fns, (*line, *col), errors);
+            Stmt::While { cond, body, span } => {
+                let k = infer_expr(cond, locals, fns, *span, errors);
                 if k != Kind::Unknown && k != Kind::Bool {
                     errors.push(CheckError {
                         message: format!("while-condition must be a boolean expression, found {}", k.name()),
-                        line: *line,
-                        col: *col,
+                        span: *span,
                     });
                 }
                 for st in body {
                     visit_stmt(st, locals, fns, errors);
                 }
             }
-            Stmt::Print { args, line, col } => {
+            Stmt::Print { args, span } => {
                 for a in args {
-                    infer_expr(a, locals, fns, (*line, *col), errors);
+                    infer_expr(a, locals, fns, *span, errors);
                 }
             }
-            Stmt::Return { value, line, col } => {
+            Stmt::Return { value, span } => {
                 if let Some(v) = value {
-                    infer_expr(v, locals, fns, (*line, *col), errors);
+                    infer_expr(v, locals, fns, *span, errors);
                 }
             }
-            Stmt::ExprStmt { expr, line, col } => {
-                infer_expr(expr, locals, fns, (*line, *col), errors);
+            Stmt::ExprStmt { expr, span } => {
+                infer_expr(expr, locals, fns, *span, errors);
             }
         }
     }
@@ -250,7 +248,7 @@ pub fn check_types(program: &Program) -> Vec<CheckError> {
             visit_stmt(s, &mut locals, &fns, &mut fn_errors);
         }
         for e in fn_errors {
-            errors.push(CheckError { message: format!("in '{}': {}", fn_.name, e.message), line: e.line, col: e.col });
+            errors.push(CheckError { message: format!("in '{}': {}", fn_.name, e.message), span: e.span });
         }
     }
     errors

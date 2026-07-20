@@ -61,7 +61,7 @@ fn main() -> ExitCode {
     let tokens = match lexer::lex(&src) {
         Ok(t) => t,
         Err(e) => {
-            eprintln!("kestrelc: {}", format_diagnostic(&src, &path, e.line, e.col, e.len, &e.message));
+            eprintln!("kestrelc: {}", format_diagnostic(&src, &path, e.span.line, e.span.col, e.span.len, &e.message));
             return ExitCode::FAILURE;
         }
     };
@@ -69,7 +69,7 @@ fn main() -> ExitCode {
     let program = match parser::parse(tokens) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("kestrelc: {}", format_diagnostic(&src, &path, e.line, e.col, e.len, &e.message));
+            eprintln!("kestrelc: {}", format_diagnostic(&src, &path, e.span.line, e.span.col, e.span.len, &e.message));
             return ExitCode::FAILURE;
         }
     };
@@ -78,7 +78,7 @@ fn main() -> ExitCode {
     if !purity_errors.is_empty() {
         eprintln!("kestrelc: Purity check failed:");
         for e in &purity_errors {
-            eprintln!("  {}", format_diagnostic(&src, &path, e.line, e.col, 1, &e.message));
+            eprintln!("  {}", format_diagnostic(&src, &path, e.span.line, e.span.col, 1, &e.message));
         }
         return ExitCode::FAILURE;
     }
@@ -87,7 +87,7 @@ fn main() -> ExitCode {
     if !pmap_errors.is_empty() {
         eprintln!("kestrelc: parallel_map() check failed:");
         for e in &pmap_errors {
-            eprintln!("  {}", format_diagnostic(&src, &path, e.line, e.col, 1, &e.message));
+            eprintln!("  {}", format_diagnostic(&src, &path, e.span.line, e.span.col, 1, &e.message));
         }
         return ExitCode::FAILURE;
     }
@@ -96,7 +96,7 @@ fn main() -> ExitCode {
     if !type_errors.is_empty() {
         eprintln!("kestrelc: Type check failed:");
         for e in &type_errors {
-            eprintln!("  {}", format_diagnostic(&src, &path, e.line, e.col, 1, &e.message));
+            eprintln!("  {}", format_diagnostic(&src, &path, e.span.line, e.span.col, 1, &e.message));
         }
         return ExitCode::FAILURE;
     }

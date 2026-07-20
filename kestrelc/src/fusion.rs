@@ -19,7 +19,13 @@
 // top-level statements.
 
 use crate::ast::*;
+use crate::span::Span;
 use std::collections::HashMap;
+
+/// Synthesized statements/functions (the fused body, the re-introduced
+/// array `let`) have no real source position — this sentinel span makes
+/// that explicit rather than borrowing an unrelated position.
+const SYNTHESIZED: Span = Span { line: 0, col: 0, len: 0 };
 
 fn count_ident_refs(stmts: &[Stmt], name: &str) -> usize {
     let mut count = 0;
@@ -181,13 +187,9 @@ fn fuse_body(
                         args: vec![Expr::Ident("__x".to_string())],
                     }],
                 }),
-                // Synthesized, not parsed from real source — no
-                // meaningful position to point a diagnostic at.
-                line: 0,
-                col: 0,
+                span: SYNTHESIZED,
             }],
-            line: 0,
-            col: 0,
+            span: SYNTHESIZED,
         };
         // Register the synthesized function too, so a third chained
         // parallel_map (whose callee is now *this* fused function, not
@@ -206,7 +208,7 @@ fn fuse_body(
         let array_ident = match &m.arr_arg {
             Expr::Ident(name) => Expr::Ident(name.clone()),
             _ => {
-                replacement.push(Stmt::Let { name: m.a_name.clone(), value: m.arr_arg, line: 0, col: 0 });
+                replacement.push(Stmt::Let { name: m.a_name.clone(), value: m.arr_arg, span: SYNTHESIZED });
                 Expr::Ident(m.a_name.clone())
             }
         };
@@ -216,8 +218,7 @@ fn fuse_body(
                 name: "parallel_map".to_string(),
                 args: vec![Expr::Ident(fused_name), array_ident],
             },
-            line: 0,
-            col: 0,
+            span: SYNTHESIZED,
         });
         body.splice(i..i + 2, replacement);
         // Re-check this same slot: a third chained parallel_map now

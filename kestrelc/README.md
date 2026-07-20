@@ -84,13 +84,17 @@ kestrelc: fib.kes:3:12: Unexpected token 'RParen'
 `format_diagnostic` (`src/lib.rs`) is the single formatter behind this,
 shared by the CLI (`main.rs`) and `compile_to_wasm_bytes` (and so
 `kestrelc-web`/`kestrel-editor.html`'s "native (wasm)" engine). Every
-`Stmt` in `src/ast.rs` carries the line/col of its first token (set by
-the parser); `purity::check_purity`, `purity::check_parallel_map`, and
-`typecheck::check_types` return `CheckError { message, line, col }`
-values pinned to the statement they were found in, instead of bare
-strings. Honest scope: statement granularity, not full per-expression —
-`let x = f(a) + g(b);` points at the start of the `let`, not at
-whichever of `f(a)`/`g(b)` was actually the problem.
+`Stmt` in `src/ast.rs` carries a `Span` (`src/span.rs` — `{ line, col,
+len }`) marking its first token, set by the parser; `purity::check_purity`,
+`purity::check_parallel_map`, and `typecheck::check_types` return
+`CheckError { message, span }` values pinned to the statement they were
+found in, instead of bare strings. `Span` itself is a consolidation —
+`line`/`col`/`len` used to be three separate fields copy-pasted across
+`Token`, `LexError`, `ParseError`, every `Stmt` variant, and `Fn`; now
+they're all one small `Copy` struct. Honest scope: statement
+granularity, not full per-expression — `let x = f(a) + g(b);` points at
+the start of the `let`, not at whichever of `f(a)`/`g(b)` was actually
+the problem.
 
 The native backend's own codegen errors (`codegen.rs`'s "kestrelc only
 supports X so far" / "Unknown identifier" / etc. — scope errors, not

@@ -3,6 +3,7 @@ pub mod fusion;
 pub mod lexer;
 pub mod parser;
 pub mod purity;
+pub mod span;
 pub mod typecheck;
 pub mod wasm_codegen;
 pub mod where_info;
@@ -48,28 +49,34 @@ pub fn format_diagnostic(src: &str, filename: &str, line: usize, col: usize, len
 /// it already has the pieces inline).
 pub fn compile_to_wasm_bytes(src: &str) -> Result<Vec<u8>, String> {
     let tokens = lexer::lex(src)
-        .map_err(|e| format_diagnostic(src, "<input>", e.line, e.col, e.len, &e.message))?;
+        .map_err(|e| format_diagnostic(src, "<input>", e.span.line, e.span.col, e.span.len, &e.message))?;
     let program = parser::parse(tokens)
-        .map_err(|e| format_diagnostic(src, "<input>", e.line, e.col, e.len, &e.message))?;
+        .map_err(|e| format_diagnostic(src, "<input>", e.span.line, e.span.col, e.span.len, &e.message))?;
 
     let purity_errors = purity::check_purity(&program);
     if !purity_errors.is_empty() {
-        let msgs: Vec<String> =
-            purity_errors.iter().map(|e| format_diagnostic(src, "<input>", e.line, e.col, 1, &e.message)).collect();
+        let msgs: Vec<String> = purity_errors
+            .iter()
+            .map(|e| format_diagnostic(src, "<input>", e.span.line, e.span.col, 1, &e.message))
+            .collect();
         return Err(format!("Purity check failed:\n  {}", msgs.join("\n  ")));
     }
 
     let pmap_errors = purity::check_parallel_map(&program);
     if !pmap_errors.is_empty() {
-        let msgs: Vec<String> =
-            pmap_errors.iter().map(|e| format_diagnostic(src, "<input>", e.line, e.col, 1, &e.message)).collect();
+        let msgs: Vec<String> = pmap_errors
+            .iter()
+            .map(|e| format_diagnostic(src, "<input>", e.span.line, e.span.col, 1, &e.message))
+            .collect();
         return Err(format!("parallel_map() check failed:\n  {}", msgs.join("\n  ")));
     }
 
     let type_errors = typecheck::check_types(&program);
     if !type_errors.is_empty() {
-        let msgs: Vec<String> =
-            type_errors.iter().map(|e| format_diagnostic(src, "<input>", e.line, e.col, 1, &e.message)).collect();
+        let msgs: Vec<String> = type_errors
+            .iter()
+            .map(|e| format_diagnostic(src, "<input>", e.span.line, e.span.col, 1, &e.message))
+            .collect();
         return Err(format!("Type check failed:\n  {}", msgs.join("\n  ")));
     }
 

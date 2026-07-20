@@ -1,6 +1,8 @@
 // Direct port of kestrel.js's lex() — same token set, same rules.
 // See docs/SYNTAX.md for the grammar this implements.
 
+use crate::span::Span;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Tok {
     Number(i64),
@@ -49,17 +51,13 @@ pub enum Tok {
 #[derive(Debug, Clone)]
 pub struct Token {
     pub tok: Tok,
-    pub line: usize,
-    pub col: usize,
-    pub len: usize,
+    pub span: Span,
 }
 
 #[derive(Debug)]
 pub struct LexError {
     pub message: String,
-    pub line: usize,
-    pub col: usize,
-    pub len: usize,
+    pub span: Span,
 }
 
 pub fn lex(src: &str) -> Result<Vec<Token>, LexError> {
@@ -104,11 +102,9 @@ pub fn lex(src: &str) -> Result<Vec<Token>, LexError> {
             // kestrelc supports integers only for now (see kestrelc/README.md).
             let value: i64 = text.parse().map_err(|_| LexError {
                 message: format!("kestrelc only supports integer literals so far, found '{text}'"),
-                line: start_line,
-                col: start_col,
-                len: i - start,
+                span: Span::new(start_line, start_col, i - start),
             })?;
-            tokens.push(Token { tok: Tok::Number(value), line: start_line, col: start_col, len: i - start });
+            tokens.push(Token { tok: Tok::Number(value), span: Span::new(start_line, start_col, i - start) });
             continue;
         }
         if c.is_alphabetic() || c == '_' {
@@ -131,7 +127,7 @@ pub fn lex(src: &str) -> Result<Vec<Token>, LexError> {
                 "false" => Tok::False,
                 _ => Tok::Ident(word),
             };
-            tokens.push(Token { tok, line: start_line, col: start_col, len: i - start });
+            tokens.push(Token { tok, span: Span::new(start_line, start_col, i - start) });
             continue;
         }
         if c == '"' {
@@ -145,7 +141,7 @@ pub fn lex(src: &str) -> Result<Vec<Token>, LexError> {
             let s: String = chars[str_start..i].iter().collect();
             i += 1; // closing quote
             col += 1;
-            tokens.push(Token { tok: Tok::Str(s), line: start_line, col: start_col, len: i - start });
+            tokens.push(Token { tok: Tok::Str(s), span: Span::new(start_line, start_col, i - start) });
             continue;
         }
 
@@ -166,7 +162,7 @@ pub fn lex(src: &str) -> Result<Vec<Token>, LexError> {
         if let Some(t) = two {
             i += 2;
             col += 2;
-            tokens.push(Token { tok: t, line: start_line, col: start_col, len: 2 });
+            tokens.push(Token { tok: t, span: Span::new(start_line, start_col, 2) });
             continue;
         }
 
@@ -196,20 +192,18 @@ pub fn lex(src: &str) -> Result<Vec<Token>, LexError> {
             Some(t) => {
                 i += 1;
                 col += 1;
-                tokens.push(Token { tok: t, line: start_line, col: start_col, len: 1 });
+                tokens.push(Token { tok: t, span: Span::new(start_line, start_col, 1) });
             }
             None => {
                 return Err(LexError {
                     message: format!("Unexpected character '{c}'"),
-                    line: start_line,
-                    col: start_col,
-                    len: 1,
+                    span: Span::new(start_line, start_col, 1),
                 });
             }
         }
     }
 
-    tokens.push(Token { tok: Tok::Eof, line, col, len: 0 });
+    tokens.push(Token { tok: Tok::Eof, span: Span::new(line, col, 0) });
     Ok(tokens)
 }
 
@@ -222,24 +216,24 @@ mod tests {
         let tokens = lex("fn main() {\n    let x = 5;\n}\n").unwrap();
         // 'let' starts the second line, indented 4 spaces.
         let let_tok = tokens.iter().find(|t| t.tok == Tok::Let).unwrap();
-        assert_eq!(let_tok.line, 2);
-        assert_eq!(let_tok.col, 5);
-        assert_eq!(let_tok.len, 3);
+        assert_eq!(let_tok.span.line, 2);
+        assert_eq!(let_tok.span.col, 5);
+        assert_eq!(let_tok.span.len, 3);
     }
 
     #[test]
     fn token_length_matches_the_source_text_it_covers() {
         let tokens = lex("let count = 123;").unwrap();
         let number = tokens.iter().find(|t| matches!(t.tok, Tok::Number(_))).unwrap();
-        assert_eq!(number.col, 13);
-        assert_eq!(number.len, 3); // "123"
+        assert_eq!(number.span.col, 13);
+        assert_eq!(number.span.len, 3); // "123"
     }
 
     #[test]
     fn unexpected_character_error_points_at_the_exact_column() {
         let err = lex("let x = 5 $ 3;").unwrap_err();
-        assert_eq!(err.line, 1);
-        assert_eq!(err.col, 11); // the '$'
-        assert_eq!(err.len, 1);
+        assert_eq!(err.span.line, 1);
+        assert_eq!(err.span.col, 11); // the '$'
+        assert_eq!(err.span.len, 1);
     }
 }

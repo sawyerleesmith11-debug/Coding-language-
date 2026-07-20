@@ -4,6 +4,7 @@
 // ast.rs's CheckError doc comment for the statement-granularity scope.
 
 use crate::ast::*;
+use crate::span::Span;
 use std::collections::{HashMap, HashSet};
 
 pub fn check_purity(program: &Program) -> Vec<CheckError> {
@@ -142,8 +143,7 @@ pub fn check_purity(program: &Program) -> Vec<CheckError> {
                         "'{}' is marked pure but calls print or an impure function",
                         fn_.name
                     ),
-                    line: fn_.line,
-                    col: fn_.col,
+                    span: fn_.span,
                 });
             }
         }
@@ -164,12 +164,12 @@ pub fn check_parallel_map(program: &Program) -> Vec<CheckError> {
     let fns: HashMap<&str, &Fn> = program.iter().map(|f| (f.name.as_str(), f)).collect();
     let mut errors = Vec::new();
 
-    // `pos` is the *enclosing statement's* line/col, not the exact
+    // `span` is the *enclosing statement's* span, not the exact
     // parallel_map(...) call's own position — see ast.rs's CheckError
     // doc comment on the statement-granularity scope this is limited to.
-    fn visit_expr(e: &Expr, fns: &HashMap<&str, &Fn>, pos: (usize, usize), errors: &mut Vec<CheckError>) {
+    fn visit_expr(e: &Expr, fns: &HashMap<&str, &Fn>, span: Span, errors: &mut Vec<CheckError>) {
         let push = |errors: &mut Vec<CheckError>, message: String| {
-            errors.push(CheckError { message, line: pos.0, col: pos.1 });
+            errors.push(CheckError { message, span });
         };
         match e {
             Expr::Call { name, args } if name == "parallel_map" => {
@@ -199,25 +199,25 @@ pub fn check_parallel_map(program: &Program) -> Vec<CheckError> {
                         "parallel_map()'s first argument must be a bare function name, not an expression".to_string(),
                     ),
                 }
-                visit_expr(&args[1], fns, pos, errors);
+                visit_expr(&args[1], fns, span, errors);
             }
             Expr::Call { args, .. } => {
                 for a in args {
-                    visit_expr(a, fns, pos, errors);
+                    visit_expr(a, fns, span, errors);
                 }
             }
             Expr::Binop { left, right, .. } => {
-                visit_expr(left, fns, pos, errors);
-                visit_expr(right, fns, pos, errors);
+                visit_expr(left, fns, span, errors);
+                visit_expr(right, fns, span, errors);
             }
-            Expr::Unary { expr, .. } => visit_expr(expr, fns, pos, errors),
+            Expr::Unary { expr, .. } => visit_expr(expr, fns, span, errors),
             Expr::Index { target, index } => {
-                visit_expr(target, fns, pos, errors);
-                visit_expr(index, fns, pos, errors);
+                visit_expr(target, fns, span, errors);
+                visit_expr(index, fns, span, errors);
             }
             Expr::ArrayLit(elems) => {
                 for el in elems {
-                    visit_expr(el, fns, pos, errors);
+                    visit_expr(el, fns, span, errors);
                 }
             }
             _ => {}
@@ -226,11 +226,11 @@ pub fn check_parallel_map(program: &Program) -> Vec<CheckError> {
 
     fn visit_stmt(s: &Stmt, fns: &HashMap<&str, &Fn>, errors: &mut Vec<CheckError>) {
         match s {
-            Stmt::Let { value, line, col, .. } | Stmt::Assign { value, line, col, .. } => {
-                visit_expr(value, fns, (*line, *col), errors)
+            Stmt::Let { value, span, .. } | Stmt::Assign { value, span, .. } => {
+                visit_expr(value, fns, *span, errors)
             }
-            Stmt::If { cond, then_block, else_block, line, col } => {
-                visit_expr(cond, fns, (*line, *col), errors);
+            Stmt::If { cond, then_block, else_block, span } => {
+                visit_expr(cond, fns, *span, errors);
                 for st in then_block {
                     visit_stmt(st, fns, errors);
                 }
@@ -240,23 +240,23 @@ pub fn check_parallel_map(program: &Program) -> Vec<CheckError> {
                     }
                 }
             }
-            Stmt::While { cond, body, line, col } => {
-                visit_expr(cond, fns, (*line, *col), errors);
+            Stmt::While { cond, body, span } => {
+                visit_expr(cond, fns, *span, errors);
                 for st in body {
                     visit_stmt(st, fns, errors);
                 }
             }
-            Stmt::Print { args, line, col } => {
+            Stmt::Print { args, span } => {
                 for a in args {
-                    visit_expr(a, fns, (*line, *col), errors);
+                    visit_expr(a, fns, *span, errors);
                 }
             }
-            Stmt::Return { value, line, col } => {
+            Stmt::Return { value, span } => {
                 if let Some(v) = value {
-                    visit_expr(v, fns, (*line, *col), errors);
+                    visit_expr(v, fns, *span, errors);
                 }
             }
-            Stmt::ExprStmt { expr, line, col } => visit_expr(expr, fns, (*line, *col), errors),
+            Stmt::ExprStmt { expr, span } => visit_expr(expr, fns, *span, errors),
         }
     }
 

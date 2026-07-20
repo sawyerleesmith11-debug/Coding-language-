@@ -204,33 +204,31 @@ fn inline_stmts(stmts: &[Stmt], candidates: &HashMap<String, Candidate>) -> Vec<
     stmts
         .iter()
         .map(|s| match s {
-            Stmt::Let { name, value, line, col } => {
-                Stmt::Let { name: name.clone(), value: inline_expr(value, candidates), line: *line, col: *col }
+            Stmt::Let { name, value, span } => {
+                Stmt::Let { name: name.clone(), value: inline_expr(value, candidates), span: *span }
             }
-            Stmt::Assign { name, value, line, col } => {
-                Stmt::Assign { name: name.clone(), value: inline_expr(value, candidates), line: *line, col: *col }
+            Stmt::Assign { name, value, span } => {
+                Stmt::Assign { name: name.clone(), value: inline_expr(value, candidates), span: *span }
             }
-            Stmt::If { cond, then_block, else_block, line, col } => Stmt::If {
+            Stmt::If { cond, then_block, else_block, span } => Stmt::If {
                 cond: inline_expr(cond, candidates),
                 then_block: inline_stmts(then_block, candidates),
                 else_block: else_block.as_ref().map(|b| inline_stmts(b, candidates)),
-                line: *line,
-                col: *col,
+                span: *span,
             },
-            Stmt::While { cond, body, line, col } => Stmt::While {
+            Stmt::While { cond, body, span } => Stmt::While {
                 cond: inline_expr(cond, candidates),
                 body: inline_stmts(body, candidates),
-                line: *line,
-                col: *col,
+                span: *span,
             },
-            Stmt::Print { args, line, col } => {
-                Stmt::Print { args: args.iter().map(|a| inline_expr(a, candidates)).collect(), line: *line, col: *col }
+            Stmt::Print { args, span } => {
+                Stmt::Print { args: args.iter().map(|a| inline_expr(a, candidates)).collect(), span: *span }
             }
-            Stmt::Return { value, line, col } => {
-                Stmt::Return { value: value.as_ref().map(|e| inline_expr(e, candidates)), line: *line, col: *col }
+            Stmt::Return { value, span } => {
+                Stmt::Return { value: value.as_ref().map(|e| inline_expr(e, candidates)), span: *span }
             }
-            Stmt::ExprStmt { expr, line, col } => {
-                Stmt::ExprStmt { expr: inline_expr(expr, candidates), line: *line, col: *col }
+            Stmt::ExprStmt { expr, span } => {
+                Stmt::ExprStmt { expr: inline_expr(expr, candidates), span: *span }
             }
         })
         .collect()

@@ -394,9 +394,12 @@ real future work.
 
 `kestrelc`'s own `purity.rs`/`typecheck.rs` now report the same kind of
 positioned diagnostic, not just the JS backends: every `Stmt` in
-`kestrelc/src/ast.rs` carries the line/col of its first token (set by
-the parser), `check_purity`/`check_parallel_map`/`check_types` return
-`CheckError { message, line, col }` instead of a bare `String`, and
+`kestrelc/src/ast.rs` carries a `Span` (`kestrelc/src/span.rs` —
+`{ line, col, len }`, consolidated from what used to be three separate
+copy-pasted fields duplicated across `Token`, `LexError`, `ParseError`,
+every `Stmt` variant, `Fn`, and `CheckError`) marking its first token,
+set by the parser. `check_purity`/`check_parallel_map`/`check_types`
+return `CheckError { message, span }` instead of a bare `String`, and
 `main.rs` / `lib.rs`'s `compile_to_wasm_bytes` render each one through
 the same `format_diagnostic` helper lex/parse errors already used — so
 `kestrelc` (native CLI, `--wasm`, and `kestrelc-web`) all get the real

@@ -485,7 +485,7 @@ impl Codegen {
                 where_info: &self.where_info,
                 my_where: self.where_info.get(&f.name),
                 epilogue,
-                cur_pos: (f.line, f.col),
+                cur_pos: (f.span.line, f.span.col),
             };
             let terminated = fc.gen_block(&f.body)?;
             if let Some((epilogue_blk, ret_var)) = fc.epilogue {
@@ -816,13 +816,13 @@ impl<'a> FnCodegen<'a> {
 
     fn gen_stmt(&mut self, s: &Stmt) -> CgResult<bool> {
         self.cur_pos = match s {
-            Stmt::Let { line, col, .. }
-            | Stmt::Assign { line, col, .. }
-            | Stmt::If { line, col, .. }
-            | Stmt::While { line, col, .. }
-            | Stmt::Print { line, col, .. }
-            | Stmt::Return { line, col, .. }
-            | Stmt::ExprStmt { line, col, .. } => (*line, *col),
+            Stmt::Let { span, .. }
+            | Stmt::Assign { span, .. }
+            | Stmt::If { span, .. }
+            | Stmt::While { span, .. }
+            | Stmt::Print { span, .. }
+            | Stmt::Return { span, .. }
+            | Stmt::ExprStmt { span, .. } => (span.line, span.col),
         };
         match s {
             Stmt::Let { name, value, .. } => {

@@ -4,6 +4,8 @@
 // kestrelc/README.md) so unsupported programs fail with a clear error
 // instead of silently miscompiling.
 
+use crate::span::Span;
+
 #[derive(Debug, Clone)]
 pub enum Type {
     Named(String),
@@ -52,7 +54,7 @@ pub enum BinOp {
     Or,
 }
 
-// Every variant carries the line/col of its first token — statement
+// Every variant carries the Span of its first token — statement
 // granularity, not full per-expression (see kestrel-DESIGN.md's roadmap
 // item 1: a span on every AST node, not just statements, is still future
 // work). This is enough to point purity/type-check errors at a real
@@ -60,13 +62,13 @@ pub enum BinOp {
 // kestrel.js's own checkPurity/checkTypes already report at.
 #[derive(Debug, Clone)]
 pub enum Stmt {
-    Let { name: String, value: Expr, line: usize, col: usize },
-    Assign { name: String, value: Expr, line: usize, col: usize },
-    If { cond: Expr, then_block: Vec<Stmt>, else_block: Option<Vec<Stmt>>, line: usize, col: usize },
-    While { cond: Expr, body: Vec<Stmt>, line: usize, col: usize },
-    Print { args: Vec<Expr>, line: usize, col: usize },
-    Return { value: Option<Expr>, line: usize, col: usize },
-    ExprStmt { expr: Expr, line: usize, col: usize },
+    Let { name: String, value: Expr, span: Span },
+    Assign { name: String, value: Expr, span: Span },
+    If { cond: Expr, then_block: Vec<Stmt>, else_block: Option<Vec<Stmt>>, span: Span },
+    While { cond: Expr, body: Vec<Stmt>, span: Span },
+    Print { args: Vec<Expr>, span: Span },
+    Return { value: Option<Expr>, span: Span },
+    ExprStmt { expr: Expr, span: Span },
 }
 
 /// A checker-reported error (purity, `parallel_map` misuse, type
@@ -78,8 +80,7 @@ pub enum Stmt {
 #[derive(Debug, Clone)]
 pub struct CheckError {
     pub message: String,
-    pub line: usize,
-    pub col: usize,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone)]
@@ -90,8 +91,7 @@ pub struct Fn {
     pub return_type: Option<Type>,
     pub where_clause: Option<Expr>,
     pub body: Vec<Stmt>,
-    pub line: usize,
-    pub col: usize,
+    pub span: Span,
 }
 
 pub type Program = Vec<Fn>;
