@@ -542,13 +542,22 @@ construction: `f` and `g` are already proven pure, and the synthesized
 function is a trivial composition of two already-pure functions, not a
 new proof. Chains fuse transitively (a 3-deep chain collapses to one
 function), and it also fires inside `if`/`while` bodies, not just at
-top level. **Scope, honestly:** deliberately narrow — only this exact
-adjacent-`let` shape triggers it. A chain split across other
-statements, an intermediate array referenced more than once, or a
-source that isn't a bare `parallel_map` call are all left unfused
-rather than guessed at. General loop fusion beyond `parallel_map`
-chains specifically (e.g. a plain `while`-loop calling multiple pure
-fns per iteration) is still unaddressed.
+top level. **Scope, honestly:** deliberately narrow — an intermediate
+array referenced more than once, or a source that isn't a bare
+`parallel_map` call, are still left unfused rather than guessed at.
+One generalization past the original adjacent-`let`-only shape: the two
+`let`s no longer have to be textually adjacent — a statement sitting
+between them is left exactly where it is, untouched, as long as it
+doesn't reference the intermediate array. Safe for the same reason the
+whole optimization is safe at all: `parallel_map`'s callback is required
+`pure`, so *when* the intermediate array actually gets computed relative
+to an unrelated statement can't change what the program observes.
+Ported to both `kestrel.js`'s `fuseLoops` and `kestrelc/src/fusion.rs`
+identically, same as the rest of this pass. General loop fusion beyond
+`parallel_map` chains specifically (e.g. a plain `while`-loop calling
+multiple pure fns per iteration) is still unaddressed — this
+generalizes *which statements can separate* a chain, not *what shapes*
+count as a chain in the first place.
 
 **Measured** on this machine, `runFast`, external-process/best-of-5
 timing: a two-stage chain over a 5,000-element array — **968ms fused
@@ -602,8 +611,11 @@ Not yet implemented (future work, roughly in priority order):
    not just statements. Still open: runtime errors (unknown identifier,
    out-of-bounds index, etc.) in every backend remain message-only.
 2. Memoization is now in all backends (see above); `parallel_map`-chain
-   fusion is now in both — still open: generalizing fusion beyond the
-   current narrow adjacent-`let` shape. Native memoization's 64-slot cap
+   fusion is now in both, and the two `let`s no longer need to be
+   textually adjacent (see the loop fusion section above) — still open:
+   generalizing fusion to shapes beyond a `parallel_map`-to-`parallel_map`
+   chain at all (e.g. a plain `while`-loop calling multiple pure fns per
+   iteration). Native memoization's 64-slot cap
    is gone (`kestrelc_runtime.c`'s outer per-function table grows on
    demand now, same doubling-growth idea as each slot's own hash table
    already had) — see `tests/integration.rs`'s

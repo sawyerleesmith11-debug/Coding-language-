@@ -10,13 +10,20 @@
 // *original* program), and the synthesized fn is a trivial composition
 // of two already-pure functions, not a new proof.
 //
-// Deliberately narrow, matching the JS version: only this exact
-// adjacent-statement shape triggers it. A chain split across other
-// statements, an intermediate array used more than once, or a source
-// that isn't a bare parallel_map call are all left unfused rather than
-// guessed at. Chains fuse transitively (a 3-deep chain collapses to one
-// function), and it recurses into if/while bodies too, not just
-// top-level statements.
+// Deliberately narrow, matching the JS version for the shape that
+// matters (an intermediate array used more than once, or a source
+// that isn't a bare parallel_map call, are still left unfused rather
+// than guessed at) but with one real generalization past the JS
+// version and kestrelc's own original port: the two `let`s no longer
+// need to be textually adjacent. A statement sitting between them is
+// left exactly where it is, untouched, as long as it doesn't reference
+// the intermediate array — safe because `parallel_map`'s callback is
+// required `pure` (no I/O, no observable effect beyond its return
+// value), so *when* `a`/`b` actually get computed relative to an
+// unrelated statement can't change what the program observes. Chains
+// still fuse transitively (a 3-deep chain collapses to one function),
+// and it still recurses into if/while bodies, not just top-level
+// statements.
 
 use crate::ast::*;
 use crate::interner::{self, Symbol};
@@ -113,8 +120,17 @@ fn as_parallel_map_call(e: &Expr) -> Option<(Symbol, &Expr)> {
     None
 }
 
-/// A match at statement index `i`: the two adjacent `let`s can fuse.
+/// A match starting at statement index `i`: `body[i]` produces `a`, and
+/// `body[j]` (the *first* later statement in this same block that's
+/// `let b = parallel_map(g, a)` — not necessarily `i + 1`) consumes it.
+/// Everything strictly between `i` and `j` is left alone by the caller;
+/// this only finds the pairing. `fuse_body`'s existing whole-body
+/// `count_ident_refs(body, a_name) != 1` check (unchanged) is what
+/// actually rejects the match if `a` is referenced anywhere else too —
+/// including by one of the statements between `i` and `j` — so this
+/// function doesn't need its own escape-analysis over that range.
 struct Match {
+    j: usize,
     a_name: Symbol,
     b_name: Symbol,
     f_name: Symbol,
@@ -123,18 +139,22 @@ struct Match {
 }
 
 fn match_fusion(body: &[Stmt], i: usize) -> Option<Match> {
-    let (Stmt::Let { name: a_name, value: v1, .. }, Stmt::Let { name: b_name, value: v2, .. }) =
-        (&body[i], &body[i + 1])
-    else {
+    let Stmt::Let { name: a_name, value: v1, .. } = &body[i] else {
         return None;
     };
     let (f_name, arr_arg) = as_parallel_map_call(v1)?;
-    let (g_name, arr_arg2) = as_parallel_map_call(v2)?;
-    let Expr::Ident(a2) = arr_arg2 else { return None };
-    if a2 != a_name {
-        return None;
+    for (j, s) in body.iter().enumerate().skip(i + 1) {
+        let Stmt::Let { name: b_name, value: v2, .. } = s else {
+            continue;
+        };
+        let Some((g_name, arr_arg2)) = as_parallel_map_call(v2) else {
+            continue;
+        };
+        if matches!(arr_arg2, Expr::Ident(a2) if a2 == a_name) {
+            return Some(Match { j, a_name: *a_name, b_name: *b_name, f_name, g_name, arr_arg: arr_arg.clone() });
+        }
     }
-    Some(Match { a_name: *a_name, b_name: *b_name, f_name, g_name, arr_arg: arr_arg.clone() })
+    None
 }
 
 fn fuse_body(
@@ -144,7 +164,7 @@ fn fuse_body(
     counter: &mut usize,
 ) {
     let mut i = 0;
-    while i + 1 < body.len() {
+    while i < body.len() {
         let Some(m) = match_fusion(body, i) else {
             i += 1;
             continue;
@@ -213,9 +233,16 @@ fn fuse_body(
             },
             span: SYNTHESIZED,
         });
-        body.splice(i..i + 2, replacement);
-        // Re-check this same slot: a third chained parallel_map now
-        // sits right after it.
+        // `j` is strictly after `i`, so removing it first doesn't
+        // invalidate `i` — leaves body[0..i] ++ (old body[i+1..j], the
+        // untouched interposed statements, unaffected) ++ body[j+1..],
+        // then the splice below replaces just the old body[i] with the
+        // fused version, preserving every interposed statement's exact
+        // original relative order.
+        body.remove(m.j);
+        body.splice(i..i + 1, replacement);
+        // Re-check this same slot: a third chained parallel_map may now
+        // be reachable from here (possibly still not adjacent).
     }
 
     for s in body.iter_mut() {
@@ -305,6 +332,63 @@ mod tests {
                 print(a[0], b[0]);
             }
             ",
+        );
+        let fused = fuse_loops(&program);
+        assert_eq!(fused.len(), 3, "no fused function should be added");
+    }
+
+    #[test]
+    fn fuses_across_an_unrelated_statement_between_the_two_lets() {
+        // The generalization past the JS version: `a` and `b`'s lets
+        // don't have to be textually adjacent. `print("hi")` here
+        // doesn't reference `a` at all, so it's safe to leave exactly
+        // where it is while `a`/`b` still fuse into one function.
+        // `src` pre-bound (rather than an inline array literal) so the
+        // fusion's own replacement is exactly one statement — keeps this
+        // test's body-layout assertion below about the interposed print
+        // independent of the separate literal-rebinding behavior
+        // (covered by the pre-existing fused-two-calls test instead).
+        let program = parse_src(
+            r#"
+            pure fn square(x: i32) -> i32 { return x * x; }
+            pure fn inc(x: i32) -> i32 { return x + 1; }
+            fn main() {
+                let src = [1, 2, 3, 4];
+                let a = parallel_map(square, src);
+                print("hi");
+                let b = parallel_map(inc, a);
+                print(b[0]);
+            }
+            "#,
+        );
+        let fused = fuse_loops(&program);
+        assert_eq!(fused.len(), 4, "should have added exactly one fused function");
+        assert!(fused.iter().any(|f| f.name.resolve().starts_with("__fused_")));
+        // The interposed print must still be there, untouched, and must
+        // still be the statement right after whatever now occupies the
+        // fused `let a = ...`'s old slot.
+        let main_fn = fused.iter().find(|f| &*f.name.resolve() == "main").unwrap();
+        assert!(matches!(&main_fn.body[2], Stmt::Print { .. }), "interposed print should be preserved in place");
+    }
+
+    #[test]
+    fn does_not_fuse_when_an_interposed_statement_reads_the_intermediate_array() {
+        // Same shape as the test above, but the interposed statement
+        // *does* reference `a` — that's an escaping use (the same rule
+        // that already blocks fusion when `a` is read after both lets),
+        // so no fusion should happen here even though `a`'s producer and
+        // `b`'s consumer are still findable.
+        let program = parse_src(
+            r#"
+            pure fn square(x: i32) -> i32 { return x * x; }
+            pure fn inc(x: i32) -> i32 { return x + 1; }
+            fn main() {
+                let a = parallel_map(square, [1, 2, 3, 4]);
+                print(a[0]);
+                let b = parallel_map(inc, a);
+                print(b[0]);
+            }
+            "#,
         );
         let fused = fuse_loops(&program);
         assert_eq!(fused.len(), 3, "no fused function should be added");

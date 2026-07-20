@@ -330,14 +330,19 @@ not just the small-array inline fallback).
 A chain of `let a = parallel_map(f, arr); let b = parallel_map(g, a);`
 (with `a` used nowhere else) fuses into one `parallel_map` over `arr`
 with a synthesized pure fn computing `g(f(x))` — one pass instead of
-two, no intermediate array. `kestrelc/src/fusion.rs`'s `fuse_loops` is
-a direct Rust port of kestrel.js's `fuseLoops` (same matching rules —
-see `kestrel-DESIGN.md`), wired into both the native and `--wasm`
-backends right before codegen. One real difference from the JS
-version: this backend's codegen requires a `parallel_map` array
-argument to always be a plain identifier bound via a literal-length
-`let`, never an inline array literal, so the fused output
-re-introduces a `let` binding for the source array where the JS
+two, no intermediate array. The two `let`s don't have to be textually
+adjacent either — a statement in between is left exactly where it is,
+untouched, as long as it doesn't reference `a`; safe because
+`parallel_map`'s callback is required pure, so *when* `a`/`b` actually
+get computed relative to an unrelated statement can't change what the
+program observes. `kestrelc/src/fusion.rs`'s `fuse_loops` is a direct
+Rust port of kestrel.js's `fuseLoops` (same matching rules, ported
+identically to both — see `kestrel-DESIGN.md`), wired into both the
+native and `--wasm` backends right before codegen. One real difference
+from the JS version: this backend's codegen requires a `parallel_map`
+array argument to always be a plain identifier bound via a
+literal-length `let`, never an inline array literal, so the fused
+output re-introduces a `let` binding for the source array where the JS
 version would just inline it.
 
 ## Memoization (native only)

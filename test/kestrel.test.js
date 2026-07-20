@@ -611,6 +611,44 @@ describe("loop fusion", () => {
     assert.equal(fused.length, 3, "no fused function should be added");
   });
 
+  test("fuses across an unrelated statement between the two lets", () => {
+    // The generalization: the two lets don't have to be adjacent. The
+    // print in between doesn't reference `a`, so it's safe to leave
+    // exactly where it is while `a`/`b` still fuse.
+    const src = `
+      pure fn square(x: i32) -> i32 { return x * x; }
+      pure fn inc(x: i32) -> i32 { return x + 1; }
+      fn main() {
+        let a = parallel_map(square, [1, 2, 3, 4]);
+        print("between");
+        let b = parallel_map(inc, a);
+        print(b[0], b[1], b[2], b[3]);
+      }
+    `;
+    const { output } = runCollect(src);
+    assert.deepEqual(output, ["between", "2 5 10 17"]);
+    const fused = Kestrel.fuseLoops(Kestrel.parse(Kestrel.lex(src)));
+    assert.equal(fused.length, 4, "should have added exactly one fused function");
+    assert.ok(fused.some((f) => f.name.startsWith("__fused_")));
+  });
+
+  test("does not fuse when an interposed statement reads the intermediate array", () => {
+    const src = `
+      pure fn square(x: i32) -> i32 { return x * x; }
+      pure fn inc(x: i32) -> i32 { return x + 1; }
+      fn main() {
+        let a = parallel_map(square, [1, 2, 3, 4]);
+        print(a[0]);
+        let b = parallel_map(inc, a);
+        print(b[0]);
+      }
+    `;
+    const { output } = runCollect(src);
+    assert.deepEqual(output, ["1", "2"]);
+    const fused = Kestrel.fuseLoops(Kestrel.parse(Kestrel.lex(src)));
+    assert.equal(fused.length, 3, "no fused function should be added");
+  });
+
   test("a single (unchained) parallel_map is left alone", () => {
     const { output } = runCollect(`
       pure fn square(x: i32) -> i32 { return x * x; }

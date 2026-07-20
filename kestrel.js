@@ -492,13 +492,16 @@ function checkParallelMap(program) {
 // have all passed on the *original* program), and the synthesized fn is a
 // trivial composition of two already-pure functions, not a new proof.
 //
-// Deliberately narrow, per kestrel-DESIGN.md: only fires on this exact
-// adjacent-statement shape (both `let`s back to back, second's array arg is
-// exactly the first's bound variable, and that variable is used nowhere
-// else in the function). A chain split across other statements, an `a`
-// used twice, or a source array that isn't a bare `parallel_map` call are
-// all left alone rather than guessed at. Runs on `if`/`while` bodies too,
-// and re-checks its own output so a 3+-deep chain fuses all the way down.
+// Deliberately narrow, per kestrel-DESIGN.md, with one generalization: the
+// two `let`s don't have to be textually adjacent anymore — a statement
+// sitting between them is left exactly where it is, untouched, as long as
+// it doesn't reference the intermediate array. Safe because parallel_map's
+// callback is required pure (no observable effect beyond its return value),
+// so *when* `a`/`b` actually get computed relative to an unrelated
+// statement can't change what the program observes. An `a` used twice, or
+// a source array that isn't a bare `parallel_map` call, are still left
+// alone rather than guessed at. Runs on `if`/`while` bodies too, and
+// re-checks its own output so a 3+-deep chain fuses all the way down.
 let fusionCounter = 0;
 
 function countIdentRefs(stmts, name) {
@@ -541,15 +544,31 @@ function fuseLoops(program) {
   const extraFns = [];
 
   function fuseBody(body) {
-    for (let i = 0; i < body.length - 1; i++) {
-      const s1 = body[i], s2 = body[i + 1];
+    for (let i = 0; i < body.length; i++) {
+      const s1 = body[i];
       if (s1.kind !== "let" || !isParallelMapCall(s1.value)) continue;
-      if (s2.kind !== "let" || !isParallelMapCall(s2.value)) continue;
-      const arrArg2 = s2.value.args[1];
-      if (arrArg2.kind !== "ident" || arrArg2.name !== s1.name) continue;
+
+      // Find the first *later* statement in this same block that
+      // consumes `a` via parallel_map — not necessarily i+1 (see the
+      // doc comment above this function). Whatever sits between i and
+      // j, if anything, is left untouched.
+      let j = -1;
+      for (let k = i + 1; k < body.length; k++) {
+        const candidate = body[k];
+        if (candidate.kind !== "let" || !isParallelMapCall(candidate.value)) continue;
+        const arrArg2 = candidate.value.args[1];
+        if (arrArg2.kind === "ident" && arrArg2.name === s1.name) {
+          j = k;
+          break;
+        }
+      }
+      if (j === -1) continue;
+      const s2 = body[j];
+
       // The only allowed reference to `a` is the one inside s2's own
       // parallel_map call (that's the "1" this counts) — anything more
-      // means `a` escapes this fusion and must stay materialized.
+      // (including a reference from one of the statements between i and
+      // j) means `a` escapes this fusion and must stay materialized.
       if (countIdentRefs(body, s1.name) !== 1) continue;
 
       const fName = s1.value.args[0].name;
@@ -576,13 +595,17 @@ function fuseLoops(program) {
       extraFns.push(fusedFn);
 
       const arrArg = s1.value.args[1];
+      // Remove the consumer (higher index) first so removing it can't
+      // shift index i out from under the replacement below; everything
+      // strictly between i and j (if anything) keeps its exact original
+      // position and relative order.
+      body.splice(j, 1);
       body[i] = {
         kind: "let", name: s2.name,
         value: { kind: "call", name: "parallel_map", args: [{ kind: "ident", name: fusedName }, arrArg] },
         line: s2.line,
       };
-      body.splice(i + 1, 1);
-      i--; // re-check this slot: a 3rd chained parallel_map now sits right after it
+      i--; // re-check this slot: a 3rd chained parallel_map may now be reachable from here
     }
     for (const s of body) {
       if (s.kind === "if") { fuseBody(s.thenBlock); if (s.elseBlock) fuseBody(s.elseBlock); }
