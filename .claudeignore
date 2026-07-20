@@ -1,0 +1,45 @@
+# Task completion documents
+.claude/completions/**
+
+# Session files
+.claude/sessions/**
+
+# Archived documentation
+docs/archive/**
+
+# Large design/editor files (use CLAUDE.md quick reference instead)
+kestrel-DESIGN.md
+kestrel-editor.html
+kestrel.js
+
+# User-facing docs (not needed during dev sessions — devs have CLAUDE.md)
+CHANGELOG.md
+README.md
+CONTRIBUTING.md
+GEMINI.md
+AGENTS.md
+.cursorrules
+.windsurfrules
+.clinerules
+.roomodes
+
+# Build outputs
+target/**
+dist/**
+node_modules/**
+build/**
+
+# Git
+.git/**
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+logs/**
+
+# OS
+.DS_Store
