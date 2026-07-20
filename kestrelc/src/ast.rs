@@ -19,8 +19,30 @@ pub struct Param {
     pub ty: Type,
 }
 
+/// Every expression node carries its own `Span` now — the leading
+/// token's position, same shallow convention `Fn`/`Stmt` already use
+/// (not a true start..end range; see span.rs and the caret-rendering
+/// code in main.rs/lib.rs, which only ever needs "point at the start of
+/// the construct on its own line," not a real multi-token/multi-line
+/// range). Wrapping `ExprKind` in a struct instead of putting `span` on
+/// every variant (the way `Stmt` does it) keeps every consumer's match
+/// arms from also having to carry a `span` binding they don't need —
+/// most callers only care about `.span` at the one or two sites that
+/// actually build an error.
 #[derive(Debug, Clone)]
-pub enum Expr {
+pub struct Expr {
+    pub kind: ExprKind,
+    pub span: Span,
+}
+
+impl Expr {
+    pub fn new(kind: ExprKind, span: Span) -> Self {
+        Expr { kind, span }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum ExprKind {
     Num(i64),
     Str(Symbol),
     Bool(bool),
@@ -55,12 +77,9 @@ pub enum BinOp {
     Or,
 }
 
-// Every variant carries the Span of its first token — statement
-// granularity, not full per-expression (see kestrel-DESIGN.md's roadmap
-// item 1: a span on every AST node, not just statements, is still future
-// work). This is enough to point purity/type-check errors at a real
-// source location instead of nothing, matching the granularity
-// kestrel.js's own checkPurity/checkTypes already report at.
+// Every variant carries the Span of its first token — `Expr` now does
+// too (see above), so a checker can report at whichever sub-expression
+// actually has the problem instead of only the enclosing statement.
 #[derive(Debug, Clone)]
 pub enum Stmt {
     Let { name: Symbol, value: Expr, span: Span },

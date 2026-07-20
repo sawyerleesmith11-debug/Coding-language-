@@ -1567,6 +1567,47 @@ fn the_71st_eligible_pure_fn_still_gets_memoized_past_the_old_64_slot_cap() {
     assert_eq!(native_stdout(&run), "1836311903\n");
 }
 
+// ==================== per-expression spans ====================
+
+#[test]
+fn an_unknown_identifier_deep_in_a_statement_points_at_itself_not_the_statement_start() {
+    // Every AST node used to only carry a Span at statement granularity
+    // — an error anywhere inside `print(a, b, bogus, c)` always pointed
+    // at `print`'s own position, not whichever argument actually had
+    // the problem. `Expr` now carries its own Span (ast.rs), and
+    // resolve.rs's "Unknown identifier" error uses the offending
+    // identifier's own span, not the enclosing statement's. `bogus`
+    // starts at column 14 on this line; `print` itself starts at column
+    // 5 — this fails if the fix regresses back to statement-only spans.
+    let scratch = scratch_dir("expr_span_precision");
+    let src_path = scratch.join("prog.kes");
+    fs::write(
+        &src_path,
+        "fn main() {\n\
+         \x20   let a = 1;\n\
+         \x20   let c = 3;\n\
+         \x20   print(a, bogus, c);\n\
+         }\n",
+    )
+    .unwrap();
+
+    let out = Command::new(kestrelc_bin())
+        .arg(&src_path)
+        .current_dir(&scratch)
+        .output()
+        .expect("failed to run kestrelc");
+    assert!(!out.status.success(), "kestrelc should reject an unknown identifier");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("Unknown identifier 'bogus'"),
+        "expected an unknown-identifier error, got:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("prog.kes:4:14:"),
+        "expected the error positioned at column 14 (where 'bogus' itself starts, not column 5 where 'print' starts), got:\n{stderr}"
+    );
+}
+
 // ==================== codegen error positions ====================
 
 #[test]

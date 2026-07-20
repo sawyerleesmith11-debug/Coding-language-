@@ -78,27 +78,27 @@ fn count_ident_refs_stmts(stmts: &[Stmt], name: Symbol, count: &mut usize) {
 }
 
 fn count_ident_refs_expr(e: &Expr, name: Symbol, count: &mut usize) {
-    match e {
-        Expr::Ident(n) => {
+    match &e.kind {
+        ExprKind::Ident(n) => {
             if *n == name {
                 *count += 1;
             }
         }
-        Expr::Call { args, .. } => {
+        ExprKind::Call { args, .. } => {
             for a in args {
                 count_ident_refs_expr(a, name, count);
             }
         }
-        Expr::Binop { left, right, .. } => {
+        ExprKind::Binop { left, right, .. } => {
             count_ident_refs_expr(left, name, count);
             count_ident_refs_expr(right, name, count);
         }
-        Expr::Unary { expr, .. } => count_ident_refs_expr(expr, name, count),
-        Expr::Index { target, index } => {
+        ExprKind::Unary { expr, .. } => count_ident_refs_expr(expr, name, count),
+        ExprKind::Index { target, index } => {
             count_ident_refs_expr(target, name, count);
             count_ident_refs_expr(index, name, count);
         }
-        Expr::ArrayLit(elems) => {
+        ExprKind::ArrayLit(elems) => {
             for el in elems {
                 count_ident_refs_expr(el, name, count);
             }
@@ -110,9 +110,9 @@ fn count_ident_refs_expr(e: &Expr, name: Symbol, count: &mut usize) {
 /// If `e` is `parallel_map(<bare ident>, <anything>)`, returns
 /// (callee name, array-arg expression).
 fn as_parallel_map_call(e: &Expr) -> Option<(Symbol, &Expr)> {
-    if let Expr::Call { name, args } = e {
+    if let ExprKind::Call { name, args } = &e.kind {
         if &*name.resolve() == "parallel_map" && args.len() == 2 {
-            if let Expr::Ident(f) = &args[0] {
+            if let ExprKind::Ident(f) = &args[0].kind {
                 return Some((*f, &args[1]));
             }
         }
@@ -150,7 +150,7 @@ fn match_fusion(body: &[Stmt], i: usize) -> Option<Match> {
         let Some((g_name, arr_arg2)) = as_parallel_map_call(v2) else {
             continue;
         };
-        if matches!(arr_arg2, Expr::Ident(a2) if a2 == a_name) {
+        if matches!(&arr_arg2.kind, ExprKind::Ident(a2) if a2 == a_name) {
             return Some(Match { j, a_name: *a_name, b_name: *b_name, f_name, g_name, arr_arg: arr_arg.clone() });
         }
     }
@@ -196,10 +196,16 @@ fn fuse_body(
             return_type: g_fn.return_type.clone(),
             where_clause: None,
             body: vec![Stmt::Return {
-                value: Some(Expr::Call {
-                    name: m.g_name,
-                    args: vec![Expr::Call { name: m.f_name, args: vec![Expr::Ident(x_sym)] }],
-                }),
+                value: Some(Expr::new(
+                    ExprKind::Call {
+                        name: m.g_name,
+                        args: vec![Expr::new(
+                            ExprKind::Call { name: m.f_name, args: vec![Expr::new(ExprKind::Ident(x_sym), SYNTHESIZED)] },
+                            SYNTHESIZED,
+                        )],
+                    },
+                    SYNTHESIZED,
+                )),
                 span: SYNTHESIZED,
             }],
             span: SYNTHESIZED,
@@ -218,19 +224,22 @@ fn fuse_body(
         // it's the literal from the first parallel_map's own call),
         // reintroduce a `let` binding for it instead of inlining it.
         let mut replacement: Vec<Stmt> = Vec::new();
-        let array_ident = match &m.arr_arg {
-            Expr::Ident(name) => Expr::Ident(*name),
+        let array_ident = match &m.arr_arg.kind {
+            ExprKind::Ident(name) => Expr::new(ExprKind::Ident(*name), SYNTHESIZED),
             _ => {
-                replacement.push(Stmt::Let { name: m.a_name, value: m.arr_arg, span: SYNTHESIZED });
-                Expr::Ident(m.a_name)
+                replacement.push(Stmt::Let { name: m.a_name, value: m.arr_arg.clone(), span: SYNTHESIZED });
+                Expr::new(ExprKind::Ident(m.a_name), SYNTHESIZED)
             }
         };
         replacement.push(Stmt::Let {
             name: m.b_name,
-            value: Expr::Call {
-                name: interner::intern("parallel_map"),
-                args: vec![Expr::Ident(fused_name), array_ident],
-            },
+            value: Expr::new(
+                ExprKind::Call {
+                    name: interner::intern("parallel_map"),
+                    args: vec![Expr::new(ExprKind::Ident(fused_name), SYNTHESIZED), array_ident],
+                },
+                SYNTHESIZED,
+            ),
             span: SYNTHESIZED,
         });
         // `j` is strictly after `i`, so removing it first doesn't

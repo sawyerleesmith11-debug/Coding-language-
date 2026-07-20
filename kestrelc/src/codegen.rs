@@ -590,11 +590,11 @@ enum Slot {
 // yet (rejected with a clear error at codegen time, once `resolve_array`
 // runs — see `gen_binding`'s parallel_map arm).
 fn slot_kind_for_let(value: &Expr, known_lens: &HashMap<Symbol, usize>) -> SlotKind {
-    match value {
-        Expr::ArrayLit(elems) => SlotKind::Array { literal_len: Some(elems.len()) },
-        Expr::Call { name, args } if &*name.resolve() == "parallel_map" && args.len() == 2 => {
-            let len = match &args[1] {
-                Expr::Ident(arr_name) => known_lens.get(arr_name).copied(),
+    match &value.kind {
+        ExprKind::ArrayLit(elems) => SlotKind::Array { literal_len: Some(elems.len()) },
+        ExprKind::Call { name, args } if &*name.resolve() == "parallel_map" && args.len() == 2 => {
+            let len = match &args[1].kind {
+                ExprKind::Ident(arr_name) => known_lens.get(arr_name).copied(),
                 _ => None,
             };
             SlotKind::Array { literal_len: len }
@@ -721,14 +721,14 @@ impl<'a> FnCodegen<'a> {
     /// the scalar case (one Variable) and the array-literal case (stack
     /// allocation + one store per element, then the ptr/len Variables).
     fn gen_binding(&mut self, name: Symbol, value: &Expr) -> CgResult<()> {
-        match (&self.vars[&name], value) {
+        match (&self.vars[&name], &value.kind) {
             (Slot::Scalar(var), _) => {
                 let var = *var;
                 let v = self.gen_expr(value)?;
                 self.builder.def_var(var, v);
                 Ok(())
             }
-            (Slot::Array { ptr, len, literal_len }, Expr::ArrayLit(elems)) => {
+            (Slot::Array { ptr, len, literal_len }, ExprKind::ArrayLit(elems)) => {
                 let (ptr, len) = (*ptr, *len);
                 let expected = literal_len.expect("array let-bindings always have a literal_len");
                 if elems.len() != expected {
@@ -756,10 +756,10 @@ impl<'a> FnCodegen<'a> {
                 self.builder.def_var(len, len_val);
                 Ok(())
             }
-            (Slot::Array { ptr, len, literal_len }, Expr::Call { name: call_name, args }) if &*call_name.resolve() == "parallel_map" => {
+            (Slot::Array { ptr, len, literal_len }, ExprKind::Call { name: call_name, args }) if &*call_name.resolve() == "parallel_map" => {
                 let (ptr, len) = (*ptr, *len);
-                let func_name = match &args[0] {
-                    Expr::Ident(n) => *n,
+                let func_name = match &args[0].kind {
+                    ExprKind::Ident(n) => *n,
                     _ => {
                         return Err(self.err(
                             "parallel_map()'s first argument must be a bare function name".into(),
@@ -928,14 +928,14 @@ impl<'a> FnCodegen<'a> {
         }
         for (i, arg) in args.iter().enumerate() {
             let is_last = i == args.len() - 1;
-            match arg {
-                Expr::Str(s) => {
+            match &arg.kind {
+                ExprKind::Str(s) => {
                     let fmt_text = if is_last { format!("{s}\n") } else { format!("{s} ") };
                     let fmt = self.intern_str_owned(&fmt_text)?;
                     self.call_printf_str_literal(fmt)?;
                 }
-                other => {
-                    let v = self.gen_expr(other)?;
+                _ => {
+                    let v = self.gen_expr(arg)?;
                     let fmt_text = if is_last { "%lld\n" } else { "%lld " };
                     let fmt = self.intern_str_owned(fmt_text)?;
                     self.call_printf(fmt, Some(v))?;
@@ -988,8 +988,8 @@ impl<'a> FnCodegen<'a> {
     /// for anything fancier (e.g. indexing the result of a call) rather
     /// than silently doing the wrong thing.
     fn resolve_array(&mut self, e: &Expr) -> CgResult<(Value, Value)> {
-        let name = match e {
-            Expr::Ident(name) => name,
+        let name = match &e.kind {
+            ExprKind::Ident(name) => name,
             _ => {
                 return Err(self.err(
                     "kestrelc only supports indexing/passing a plain array variable so far".into(),
@@ -1010,8 +1010,8 @@ impl<'a> FnCodegen<'a> {
     /// be proven at compile time; doesn't affect the (ptr, len) values
     /// actually used at runtime.
     fn static_array_len(&self, e: &Expr) -> Option<usize> {
-        match e {
-            Expr::Ident(name) => match self.vars.get(name) {
+        match &e.kind {
+            ExprKind::Ident(name) => match self.vars.get(name) {
                 Some(Slot::Array { literal_len, .. }) => *literal_len,
                 _ => None,
             },
@@ -1020,29 +1020,29 @@ impl<'a> FnCodegen<'a> {
     }
 
     fn gen_expr(&mut self, e: &Expr) -> CgResult<Value> {
-        match e {
-            Expr::Num(n) => Ok(self.builder.ins().iconst(types::I64, *n)),
-            Expr::Bool(b) => Ok(self.builder.ins().iconst(types::I64, if *b { 1 } else { 0 })),
-            Expr::Str(_) => Err(self.err(
+        match &e.kind {
+            ExprKind::Num(n) => Ok(self.builder.ins().iconst(types::I64, *n)),
+            ExprKind::Bool(b) => Ok(self.builder.ins().iconst(types::I64, if *b { 1 } else { 0 })),
+            ExprKind::Str(_) => Err(self.err(
                 "kestrelc only supports string literals as direct print() arguments so far".into(),
             )),
-            Expr::Ident(name) => match self.vars.get(name) {
+            ExprKind::Ident(name) => match self.vars.get(name) {
                 Some(Slot::Scalar(var)) => Ok(self.builder.use_var(*var)),
                 Some(Slot::Array { .. }) => Err(self.err(format!(
                     "'{name}' is an array — it can only be indexed (arr[i]) or passed to a function, not used as a value directly"
                 ))),
                 None => Err(self.err(format!("Unknown identifier '{name}'"))),
             },
-            Expr::ArrayLit(_) => Err(self.err(
+            ExprKind::ArrayLit(_) => Err(self.err(
                 "kestrelc only supports array literals as the direct value of a `let`/assignment so far".into(),
             )),
-            Expr::Index { target, index } => {
+            ExprKind::Index { target, index } => {
                 // Proof-carrying fast path #1: a literal index into an
                 // array whose length is also known at compile time (a
                 // `let` literal, not a parameter) can be proven safe — or
                 // proven *unsafe* — right now, with no runtime check
                 // needed either way.
-                if let (Expr::Num(n), Some(static_len)) = (index.as_ref(), self.static_array_len(target)) {
+                if let (ExprKind::Num(n), Some(static_len)) = (&index.as_ref().kind, self.static_array_len(target)) {
                     if *n < 0 || *n as usize >= static_len {
                         return Err(self.err(format!(
                             "index {n} is out of bounds for array of length {static_len} — proven at compile time, not deferred to a runtime check"
@@ -1061,7 +1061,7 @@ impl<'a> FnCodegen<'a> {
                 // call is even allowed to compile — so by the time we're
                 // generating code *inside* this function, the precondition
                 // is already guaranteed, and the check would be redundant.
-                if let (Expr::Ident(t), Expr::Ident(i)) = (target.as_ref(), index.as_ref()) {
+                if let (ExprKind::Ident(t), ExprKind::Ident(i)) = (&target.as_ref().kind, &index.as_ref().kind) {
                     if let Some(w) = self.my_where {
                         if t == &w.arr_param && i == &w.idx_param {
                             let (ptr, _len) = self.resolve_array(target)?;
@@ -1101,7 +1101,7 @@ impl<'a> FnCodegen<'a> {
                 let addr = self.builder.ins().iadd(ptr, offset);
                 Ok(self.builder.ins().load(types::I64, MemFlags::new(), addr, 0))
             }
-            Expr::Unary { op, expr } => {
+            ExprKind::Unary { op, expr } => {
                 let v = self.gen_expr(expr)?;
                 match op {
                     UnOp::Neg => Ok(self.builder.ins().ineg(v)),
@@ -1112,7 +1112,7 @@ impl<'a> FnCodegen<'a> {
                     }
                 }
             }
-            Expr::Binop { op, left, right } => {
+            ExprKind::Binop { op, left, right } => {
                 let l = self.gen_expr(left)?;
                 let r = self.gen_expr(right)?;
                 let result = match op {
@@ -1152,7 +1152,7 @@ impl<'a> FnCodegen<'a> {
                 };
                 Ok(result)
             }
-            Expr::Call { name, args } => {
+            ExprKind::Call { name, args } => {
                 let func_id = *self
                     .fn_ids
                     .get(name)
@@ -1170,8 +1170,8 @@ impl<'a> FnCodegen<'a> {
                 if let Some(w) = self.where_info.get(name) {
                     let idx_arg = &args[w.idx_pos];
                     let arr_arg = &args[w.arr_pos];
-                    let idx_lit = match idx_arg {
-                        Expr::Num(n) => *n,
+                    let idx_lit = match &idx_arg.kind {
+                        ExprKind::Num(n) => *n,
                         _ => {
                             return Err(self.err(format!(
                                 "kestrelc: can't prove '{name}''s `where {} < ...` clause here — the index argument must be a literal number so far",
@@ -1197,7 +1197,7 @@ impl<'a> FnCodegen<'a> {
                     // An array argument expands to two Cranelift values
                     // (pointer, length), matching fn_signature's two
                     // AbiParams per array-typed parameter.
-                    let is_array_ident = matches!(a, Expr::Ident(n) if matches!(self.vars.get(n), Some(Slot::Array { .. })));
+                    let is_array_ident = matches!(&a.kind, ExprKind::Ident(n) if matches!(self.vars.get(n), Some(Slot::Array { .. })));
                     if is_array_ident {
                         let (ptr, len) = self.resolve_array(a)?;
                         arg_vals.push(ptr);

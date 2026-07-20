@@ -602,15 +602,37 @@ other stage's existing boundary: a `where` clause's expression isn't
 resolved here either, since `where_info.rs` is the only thing that reads
 it, at codegen time, unchecked by purity/type-check today too.
 
+**Per-expression position tracking, shipped (`kestrelc` only):** every
+`Expr` node now carries its own `Span` (`ast.rs`), not just each `Stmt`
+— `Expr` became a small wrapper struct (`{ kind: ExprKind, span: Span }`,
+`ExprKind` holding the variants `Expr` used to be) so every consumer's
+match arms only had to change their scrutinee, not add a `span` binding
+they don't need. The parser (`parser.rs`) attaches each node's own
+leading-token span, same shallow "points at the start of the construct"
+convention `Stmt`/`Fn` already used (not a true start..end range — see
+span.rs). Real payoff, wired into `resolve.rs`'s "Unknown
+identifier"/"Unknown function" errors specifically: `print(a, b, bogus,
+c)` now points at `bogus` itself, not `print`'s own position — see
+`tests/integration.rs`'s
+`an_unknown_identifier_deep_in_a_statement_points_at_itself_not_the_statement_start`.
+Every other consumer (`purity.rs`, `typecheck.rs`, `fusion.rs`,
+`inline.rs`, `codegen.rs`, `wasm_codegen.rs`, `where_info.rs`) updated
+mechanically to match the new `ExprKind` shape but still reports at
+statement granularity for now — the plumbing is there everywhere, the
+precision payoff has only actually been wired into the one checker
+where it was cheapest and clearest to verify; the JS backends and the
+rest of `kestrelc`'s own checkers weren't touched. Still open: JS
+backend expression spans (unaffected by this — JS's own AST nodes still
+only carry `line`/`col` at the token level kestrel.js's lexer already
+had, not per-`Expr`), and using the new precision in more of `kestrelc`'s
+own error sites (typecheck.rs's binop/index/call-arity messages are the
+obvious next candidates — the span is already sitting right there on
+every sub-expression, just not read yet at most of those sites). Runtime
+errors (unknown identifier, out-of-bounds index, etc.) in every backend
+remain message-only, unaffected by this — a compile-time-only pass.
+
 Not yet implemented (future work, roughly in priority order):
-1. Full per-expression position tracking — purity/type/codegen errors,
-   in both the JS backends *and* every one of `kestrelc`'s own stages
-   now (one unified `KestrelcError` type — see above), get a real
-   `file:line:col:` + caret, but pinned to the *statement*, not the
-   exact sub-expression; going finer needs a span on every AST node,
-   not just statements. Still open: runtime errors (unknown identifier,
-   out-of-bounds index, etc.) in every backend remain message-only.
-2. Memoization is now in all backends (see above); `parallel_map`-chain
+1. Memoization is now in all backends (see above); `parallel_map`-chain
    fusion is now in both, and the two `let`s no longer need to be
    textually adjacent (see the loop fusion section above) — still open:
    generalizing fusion to shapes beyond a `parallel_map`-to-`parallel_map`
@@ -634,7 +656,7 @@ Not yet implemented (future work, roughly in priority order):
    missed cache hit) needs a real runtime-length copy loop emitted in
    Cranelift IR, since the element count isn't known until the function
    is actually entered. Scoped out of this round rather than rushed.
-3. Proof-based bounds-check *elision* in `kestrelc` — **the design
+2. Proof-based bounds-check *elision* in `kestrelc` — **the design
    doc's own `get_safe` example now works exactly as originally
    specified**: `where i < N` is proven at every call site (a literal
    index against a literal-length array), an unprovable call site is a
@@ -653,16 +675,16 @@ Not yet implemented (future work, roughly in priority order):
    before halting — `kestrelc: Index N out of bounds for array of
    length M` — in both backends, instead of a bare trap with no
    indication of what went wrong.
-4. The full runtime-profile-guided version of the persistent cache (idea
+3. The full runtime-profile-guided version of the persistent cache (idea
    #1) — call-count-driven inlining of small hot pure functions is now
    real (native backend only; see idea #1 above and `kestrelc/src/
    profile.rs` / `inline.rs`), but branch-taken/data-shape profiling and
    general pre-specialization from it are not
-5. Layout polymorphism — blocked on structs/records existing at all
+4. Layout polymorphism — blocked on structs/records existing at all
    (Kestrel doesn't have them yet — see `docs/SYNTAX.md`), a
    prerequisite bigger than the layout-choice optimization itself
-6. A more general proof system beyond simple bounds checks
-7. SIMD, then (much further out) a GPU backend — both extensions of
+5. A more general proof system beyond simple bounds checks
+6. SIMD, then (much further out) a GPU backend — both extensions of
    idea #5's CPU-parallelism work, which now has a first real version
    (`parallel_map`, native backend only — see idea #5 above); a
    general-purpose work-stealing scheduler beyond the current one

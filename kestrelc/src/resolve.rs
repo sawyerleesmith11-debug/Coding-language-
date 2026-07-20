@@ -85,32 +85,37 @@ fn resolve_expr(
     span: Span,
     errors: &mut Vec<KestrelcError>,
 ) {
-    match e {
-        Expr::Num(_) | Expr::Str(_) | Expr::Bool(_) => {}
-        Expr::Ident(name) => {
+    match &e.kind {
+        ExprKind::Num(_) | ExprKind::Str(_) | ExprKind::Bool(_) => {}
+        ExprKind::Ident(name) => {
             if !locals.contains(name) {
+                // e.span, not the enclosing statement's span: an
+                // identifier is one of the cases finer-grained than
+                // statement-level Expr spans actually pays off for —
+                // `print(a, b, c, d)` with one typo'd name now points at
+                // that exact argument, not the whole print statement.
                 errors.push(KestrelcError::new(
                     ErrorKind::Resolve,
                     format!("Unknown identifier '{name}'"),
-                    span,
+                    e.span,
                 ));
             }
         }
-        Expr::ArrayLit(elems) => {
+        ExprKind::ArrayLit(elems) => {
             for el in elems {
                 resolve_expr(el, locals, fns, span, errors);
             }
         }
-        Expr::Unary { expr, .. } => resolve_expr(expr, locals, fns, span, errors),
-        Expr::Binop { left, right, .. } => {
+        ExprKind::Unary { expr, .. } => resolve_expr(expr, locals, fns, span, errors),
+        ExprKind::Binop { left, right, .. } => {
             resolve_expr(left, locals, fns, span, errors);
             resolve_expr(right, locals, fns, span, errors);
         }
-        Expr::Index { target, index } => {
+        ExprKind::Index { target, index } => {
             resolve_expr(target, locals, fns, span, errors);
             resolve_expr(index, locals, fns, span, errors);
         }
-        Expr::Call { name, args } => {
+        ExprKind::Call { name, args } => {
             if &*name.resolve() == "parallel_map" {
                 // Its first argument is a bare function name, not a
                 // variable reference — check_parallel_map (purity.rs)
@@ -128,7 +133,7 @@ fn resolve_expr(
                 errors.push(KestrelcError::new(
                     ErrorKind::Resolve,
                     format!("Unknown function '{name}'"),
-                    span,
+                    e.span,
                 ));
             }
             for a in args {
