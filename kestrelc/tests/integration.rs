@@ -1608,6 +1608,40 @@ fn an_unknown_identifier_deep_in_a_statement_points_at_itself_not_the_statement_
     );
 }
 
+#[test]
+fn a_type_mismatch_deep_in_a_statement_points_at_the_sub_expression_not_the_statement_start() {
+    // Same idea, for typecheck.rs's infer_expr: the mismatched binop is
+    // the second print() argument, not the statement's own leading
+    // token. `5` (the binop's own span, per the parser's "leading token"
+    // convention) starts at column 14; `print` starts at column 5.
+    let scratch = scratch_dir("typecheck_span_precision");
+    let src_path = scratch.join("prog.kes");
+    fs::write(
+        &src_path,
+        "fn main() {\n\
+         \x20   let x = 1;\n\
+         \x20   print(x, 5 + true);\n\
+         }\n",
+    )
+    .unwrap();
+
+    let out = Command::new(kestrelc_bin())
+        .arg(&src_path)
+        .current_dir(&scratch)
+        .output()
+        .expect("failed to run kestrelc");
+    assert!(!out.status.success(), "kestrelc should reject mixing a number and a boolean");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("needs two numbers"),
+        "expected a type-mismatch error, got:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("prog.kes:3:14:"),
+        "expected the error positioned at column 14 (where the '5 + true' sub-expression starts, not column 5 where 'print' starts), got:\n{stderr}"
+    );
+}
+
 // ==================== codegen error positions ====================
 
 #[test]

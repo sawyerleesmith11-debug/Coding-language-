@@ -69,18 +69,20 @@ pub fn check_types(program: &Program, fns: &HashMap<Symbol, &Fn>) -> Vec<Kestrel
         }
     }
 
-    // `span` is the enclosing statement's span (see ast.rs's CheckError
-    // doc comment) — every error found anywhere inside one statement's
-    // expression tree points at that statement, not the exact
-    // sub-expression.
+    // Every error below is pushed at the specific sub-expression's own
+    // `.span` (an Index's bad index arg, a Unary/Binop's own operator
+    // position, a Call's own callee-name position) — finer than the
+    // enclosing statement, now that every `Expr` node carries its own
+    // `Span` (see ast.rs). Still not a true start..end range (see
+    // span.rs), just a more specific "point at the start of the actual
+    // problem" than a whole statement was.
     fn infer_expr(
         e: &Expr,
         locals: &HashMap<Symbol, Kind>,
         fns: &HashMap<Symbol, &Fn>,
-        span: Span,
         errors: &mut Vec<KestrelcError>,
     ) -> Kind {
-        let push = |errors: &mut Vec<KestrelcError>, message: String| {
+        let push = |errors: &mut Vec<KestrelcError>, span: Span, message: String| {
             errors.push(KestrelcError::new(ErrorKind::Type, message, span));
         };
         match &e.kind {
@@ -90,61 +92,61 @@ pub fn check_types(program: &Program, fns: &HashMap<Symbol, &Fn>) -> Vec<Kestrel
             ExprKind::Ident(name) => locals.get(name).copied().unwrap_or(Kind::Unknown),
             ExprKind::ArrayLit(elems) => {
                 for el in elems {
-                    infer_expr(el, locals, fns, span, errors);
+                    infer_expr(el, locals, fns, errors);
                 }
                 Kind::Array
             }
             ExprKind::Index { target, index } => {
-                infer_expr(target, locals, fns, span, errors);
-                let idx_kind = infer_expr(index, locals, fns, span, errors);
+                infer_expr(target, locals, fns, errors);
+                let idx_kind = infer_expr(index, locals, fns, errors);
                 if idx_kind != Kind::Unknown && idx_kind != Kind::Int {
-                    push(errors, format!("array index must be a number, found {}", idx_kind.name()));
+                    push(errors, index.span, format!("array index must be a number, found {}", idx_kind.name()));
                 }
                 Kind::Int // Kestrel arrays are integer-valued so far
             }
             ExprKind::Unary { op, expr } => {
-                let k = infer_expr(expr, locals, fns, span, errors);
+                let k = infer_expr(expr, locals, fns, errors);
                 match op {
                     UnOp::Neg => {
                         if k != Kind::Unknown && k != Kind::Int {
-                            push(errors, format!("'-' needs a number, found {}", k.name()));
+                            push(errors, e.span, format!("'-' needs a number, found {}", k.name()));
                         }
                         Kind::Int
                     }
                     UnOp::Not => {
                         if k != Kind::Unknown && k != Kind::Bool {
-                            push(errors, format!("'!' needs a boolean, found {}", k.name()));
+                            push(errors, e.span, format!("'!' needs a boolean, found {}", k.name()));
                         }
                         Kind::Bool
                     }
                 }
             }
             ExprKind::Binop { op, left, right } => {
-                let l = infer_expr(left, locals, fns, span, errors);
-                let r = infer_expr(right, locals, fns, span, errors);
+                let l = infer_expr(left, locals, fns, errors);
+                let r = infer_expr(right, locals, fns, errors);
                 let sym = op_symbol(*op);
                 match op {
                     BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
                         if !is_numeric(l) || !is_numeric(r) {
-                            push(errors, format!("'{sym}' needs two numbers, found {} and {}", l.name(), r.name()));
+                            push(errors, e.span, format!("'{sym}' needs two numbers, found {} and {}", l.name(), r.name()));
                         }
                         Kind::Int
                     }
                     BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => {
                         if !is_numeric(l) || !is_numeric(r) {
-                            push(errors, format!("'{sym}' needs two numbers, found {} and {}", l.name(), r.name()));
+                            push(errors, e.span, format!("'{sym}' needs two numbers, found {} and {}", l.name(), r.name()));
                         }
                         Kind::Bool
                     }
                     BinOp::And | BinOp::Or => {
                         if !is_boolean(l) || !is_boolean(r) {
-                            push(errors, format!("'{sym}' needs two booleans, found {} and {}", l.name(), r.name()));
+                            push(errors, e.span, format!("'{sym}' needs two booleans, found {} and {}", l.name(), r.name()));
                         }
                         Kind::Bool
                     }
                     BinOp::Eq | BinOp::Neq => {
                         if l != Kind::Unknown && r != Kind::Unknown && l != r {
-                            push(errors, format!("'{sym}' compares mismatched types: {} and {}", l.name(), r.name()));
+                            push(errors, e.span, format!("'{sym}' compares mismatched types: {} and {}", l.name(), r.name()));
                         }
                         Kind::Bool
                     }
@@ -154,13 +156,13 @@ pub fn check_types(program: &Program, fns: &HashMap<Symbol, &Fn>) -> Vec<Kestrel
                 if &*name.resolve() == "parallel_map" {
                     // Already validated by check_parallel_map; just infer the array arg.
                     if args.len() == 2 {
-                        infer_expr(&args[1], locals, fns, span, errors);
+                        infer_expr(&args[1], locals, fns, errors);
                     }
                     return Kind::Array;
                 }
                 if let Some(callee) = fns.get(name) {
                     if callee.params.len() != args.len() {
-                        push(errors, format!(
+                        push(errors, e.span, format!(
                             "'{name}' expects {} argument{}, got {}",
                             callee.params.len(),
                             if callee.params.len() == 1 { "" } else { "s" },
@@ -169,7 +171,7 @@ pub fn check_types(program: &Program, fns: &HashMap<Symbol, &Fn>) -> Vec<Kestrel
                     }
                 }
                 for a in args {
-                    infer_expr(a, locals, fns, span, errors);
+                    infer_expr(a, locals, fns, errors);
                 }
                 Kind::Unknown // return kind isn't tracked yet
             }
@@ -178,12 +180,12 @@ pub fn check_types(program: &Program, fns: &HashMap<Symbol, &Fn>) -> Vec<Kestrel
 
     fn visit_stmt(s: &Stmt, locals: &mut HashMap<Symbol, Kind>, fns: &HashMap<Symbol, &Fn>, errors: &mut Vec<KestrelcError>) {
         match s {
-            Stmt::Let { name, value, span } => {
-                let k = infer_expr(value, locals, fns, *span, errors);
+            Stmt::Let { name, value, .. } => {
+                let k = infer_expr(value, locals, fns, errors);
                 locals.entry(*name).or_insert(k);
             }
             Stmt::Assign { name, value, span } => {
-                let k = infer_expr(value, locals, fns, *span, errors);
+                let k = infer_expr(value, locals, fns, errors);
                 if let Some(&prior) = locals.get(name) {
                     if prior != Kind::Unknown && k != Kind::Unknown && prior != k {
                         errors.push(KestrelcError::new(
@@ -198,13 +200,13 @@ pub fn check_types(program: &Program, fns: &HashMap<Symbol, &Fn>) -> Vec<Kestrel
                     }
                 }
             }
-            Stmt::If { cond, then_block, else_block, span } => {
-                let k = infer_expr(cond, locals, fns, *span, errors);
+            Stmt::If { cond, then_block, else_block, .. } => {
+                let k = infer_expr(cond, locals, fns, errors);
                 if k != Kind::Unknown && k != Kind::Bool {
                     errors.push(KestrelcError::new(
                         ErrorKind::Type,
                         format!("if-condition must be a boolean expression, found {}", k.name()),
-                        *span,
+                        cond.span,
                     ));
                 }
                 for st in then_block {
@@ -216,31 +218,31 @@ pub fn check_types(program: &Program, fns: &HashMap<Symbol, &Fn>) -> Vec<Kestrel
                     }
                 }
             }
-            Stmt::While { cond, body, span } => {
-                let k = infer_expr(cond, locals, fns, *span, errors);
+            Stmt::While { cond, body, .. } => {
+                let k = infer_expr(cond, locals, fns, errors);
                 if k != Kind::Unknown && k != Kind::Bool {
                     errors.push(KestrelcError::new(
                         ErrorKind::Type,
                         format!("while-condition must be a boolean expression, found {}", k.name()),
-                        *span,
+                        cond.span,
                     ));
                 }
                 for st in body {
                     visit_stmt(st, locals, fns, errors);
                 }
             }
-            Stmt::Print { args, span } => {
+            Stmt::Print { args, .. } => {
                 for a in args {
-                    infer_expr(a, locals, fns, *span, errors);
+                    infer_expr(a, locals, fns, errors);
                 }
             }
-            Stmt::Return { value, span } => {
+            Stmt::Return { value, .. } => {
                 if let Some(v) = value {
-                    infer_expr(v, locals, fns, *span, errors);
+                    infer_expr(v, locals, fns, errors);
                 }
             }
-            Stmt::ExprStmt { expr, span } => {
-                infer_expr(expr, locals, fns, *span, errors);
+            Stmt::ExprStmt { expr, .. } => {
+                infer_expr(expr, locals, fns, errors);
             }
         }
     }

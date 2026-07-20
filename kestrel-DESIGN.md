@@ -615,21 +615,24 @@ identifier"/"Unknown function" errors specifically: `print(a, b, bogus,
 c)` now points at `bogus` itself, not `print`'s own position — see
 `tests/integration.rs`'s
 `an_unknown_identifier_deep_in_a_statement_points_at_itself_not_the_statement_start`.
-Every other consumer (`purity.rs`, `typecheck.rs`, `fusion.rs`,
-`inline.rs`, `codegen.rs`, `wasm_codegen.rs`, `where_info.rs`) updated
-mechanically to match the new `ExprKind` shape but still reports at
-statement granularity for now — the plumbing is there everywhere, the
-precision payoff has only actually been wired into the one checker
-where it was cheapest and clearest to verify; the JS backends and the
-rest of `kestrelc`'s own checkers weren't touched. Still open: JS
+`typecheck.rs`'s `infer_expr` picked up the same precision next: every
+type-mismatch message (binop operand kinds, a bad array index, `!`/`-`
+applied to the wrong kind, a call's argument-count mismatch) now points
+at the actual sub-expression's own span instead of the enclosing
+statement's — see `tests/integration.rs`'s
+`a_type_mismatch_deep_in_a_statement_points_at_the_sub_expression_not_the_statement_start`.
+`purity.rs`, `fusion.rs`, `inline.rs`, `codegen.rs`, `wasm_codegen.rs`,
+and `where_info.rs` were updated mechanically to match the new
+`ExprKind` shape but still report (where they report positions at all)
+at statement granularity — the span is sitting right there on every
+sub-expression in those files too, just not read yet. Still open: JS
 backend expression spans (unaffected by this — JS's own AST nodes still
 only carry `line`/`col` at the token level kestrel.js's lexer already
-had, not per-`Expr`), and using the new precision in more of `kestrelc`'s
-own error sites (typecheck.rs's binop/index/call-arity messages are the
-obvious next candidates — the span is already sitting right there on
-every sub-expression, just not read yet at most of those sites). Runtime
-errors (unknown identifier, out-of-bounds index, etc.) in every backend
-remain message-only, unaffected by this — a compile-time-only pass.
+had, not per-`Expr`), and wiring the same precision into `purity.rs`'s
+own error (currently one message per whole `pure fn`, not pinned to the
+actual disqualifying call/print). Runtime errors (unknown identifier,
+out-of-bounds index, etc.) in every backend remain message-only,
+unaffected by this — a compile-time-only pass.
 
 Not yet implemented (future work, roughly in priority order):
 1. Memoization is now in all backends (see above); `parallel_map`-chain
