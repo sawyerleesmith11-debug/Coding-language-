@@ -402,11 +402,21 @@ top level. **Scope, honestly:** deliberately narrow — only this exact
 adjacent-`let` shape triggers it. A chain split across other
 statements, an intermediate array referenced more than once, or a
 source that isn't a bare `parallel_map` call are all left unfused
-rather than guessed at. `kestrelc` does not fuse anything (it doesn't
-even have `parallel_map` chains as a concept yet at the IR level).
-General loop fusion beyond `parallel_map` chains specifically (e.g. a
-plain `while`-loop calling multiple pure fns per iteration) is still
-unaddressed.
+rather than guessed at. General loop fusion beyond `parallel_map`
+chains specifically (e.g. a plain `while`-loop calling multiple pure
+fns per iteration) is still unaddressed.
+
+**Loop fusion in `kestrelc` too, shipped:** a direct Rust port of the
+same AST pass (`kestrelc/src/fusion.rs`'s `fuse_loops`), same exact
+matching rules, wired into both of `kestrelc`'s backends (native and
+`--wasm`/`kestrelc-web`) right before codegen. One real difference from
+the JS version, not a scope gap: `kestrelc`'s codegen requires a
+`parallel_map` array argument to always be a plain identifier bound via
+a literal-length `let`, never an inline array literal, so the fused
+output re-introduces a `let` binding for the source array instead of
+inlining it directly — same optimization, output shaped to what this
+backend's codegen actually accepts. `kestrelc` does not memoize yet —
+see below.
 
 Not yet implemented (future work, roughly in priority order):
 1. Full per-expression position tracking — purity/type errors now get a
@@ -414,9 +424,9 @@ Not yet implemented (future work, roughly in priority order):
    *statement*, not the exact sub-expression; going finer needs a span
    on every AST node, not just statements. Also: bringing any of this
    to `kestrelc`'s own checkers, and to runtime errors in every backend.
-2. Bringing memoization and `parallel_map`-chain fusion (both shipped
-   in the JS backends, see above) to `kestrelc`. Also: generalizing
-   fusion beyond the current narrow adjacent-`let` shape.
+2. Bringing memoization (shipped in the JS backends, see above) to
+   `kestrelc` — `parallel_map`-chain fusion is now in both. Also:
+   generalizing fusion beyond the current narrow adjacent-`let` shape.
 3. Proof-based bounds-check *elision* in `kestrelc` — **the design
    doc's own `get_safe` example now works exactly as originally
    specified**: `where i < N` is proven at every call site (a literal

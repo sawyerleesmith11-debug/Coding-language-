@@ -204,8 +204,9 @@ has no pthread-aware primitives, and there's no benefit to re-deriving
 how to compile straightforward C and link it against libpthread.
 Generated code just calls one function, `kestrelc_parallel_map_i64`,
 the same way it already calls libc's `printf`. That function spawns one
-thread per available CPU core (`sysconf(_SC_NPROCESSORS_ONLN)`), splits
-the array into contiguous chunks, and calls straight back into the
+thread per available CPU core (`sysconf(_SC_NPROCESSORS_ONLN)` on
+POSIX, `GetSystemInfo` on Windows), splits the array into contiguous
+chunks, and calls straight back into the
 Cranelift-compiled `pure fn` (via its own address, obtained with
 Cranelift's `func_addr`) from each thread. Below 10,000 elements or on
 a single-core machine, it runs inline instead — thread setup/teardown
@@ -227,6 +228,21 @@ native backend's real threaded output is checked against for
 correctness (see `tests/integration.rs`'s large-array test, which
 generates a 20,000-element array to force the real thread-pool path,
 not just the small-array inline fallback).
+
+## Loop fusion
+
+A chain of `let a = parallel_map(f, arr); let b = parallel_map(g, a);`
+(with `a` used nowhere else) fuses into one `parallel_map` over `arr`
+with a synthesized pure fn computing `g(f(x))` — one pass instead of
+two, no intermediate array. `kestrelc/src/fusion.rs`'s `fuse_loops` is
+a direct Rust port of kestrel.js's `fuseLoops` (same matching rules —
+see `kestrel-DESIGN.md`), wired into both the native and `--wasm`
+backends right before codegen. One real difference from the JS
+version: this backend's codegen requires a `parallel_map` array
+argument to always be a plain identifier bound via a literal-length
+`let`, never an inline array literal, so the fused output
+re-introduces a `let` binding for the source array where the JS
+version would just inline it.
 
 ## Benchmarks
 

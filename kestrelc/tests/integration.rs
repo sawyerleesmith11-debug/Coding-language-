@@ -677,6 +677,42 @@ fn parallel_map_produces_correct_results_natively() {
 }
 
 #[test]
+fn chained_parallel_map_calls_fuse_and_still_produce_correct_output() {
+    // Same fusion kestrel.js's fuseLoops does: `let a = parallel_map(f,
+    // arr); let b = parallel_map(g, a);` becomes one parallel_map with a
+    // synthesized g(f(x)) function. This is a real end-to-end check
+    // (compile, link, run, verify actual output) — src/fusion.rs's own
+    // unit tests check the AST transform in isolation; this one proves
+    // the fused program still codegens and runs correctly.
+    let scratch = scratch_dir("pmap_fused");
+    let src_path = scratch.join("pmap_fused.kes");
+    fs::write(
+        &src_path,
+        r#"
+        pure fn square(x: i32) -> i32 { return x * x; }
+        pure fn inc(x: i32) -> i32 { return x + 1; }
+        fn main() {
+            let a = parallel_map(square, [1, 2, 3, 4]);
+            let b = parallel_map(inc, a);
+            print(b[0], b[1], b[2], b[3]);
+        }
+        "#,
+    )
+    .unwrap();
+
+    let out = Command::new(kestrelc_bin())
+        .arg(&src_path)
+        .current_dir(&scratch)
+        .output()
+        .expect("failed to run kestrelc");
+    assert!(out.status.success(), "compile failed:\n{}", String::from_utf8_lossy(&out.stderr));
+
+    let bin = scratch.join("pmap_fused");
+    let run = Command::new(&bin).output().expect("failed to run compiled binary");
+    assert_eq!(native_stdout(&run), "2 5 10 17\n");
+}
+
+#[test]
 fn parallel_map_is_correct_on_a_large_array_that_crosses_the_real_thread_pool_threshold() {
     // kestrelc_runtime.c only spins up real OS threads above a size
     // threshold (see runtime/kestrelc_runtime.c) — below it, running
@@ -832,6 +868,38 @@ fn wasm_backend_parallel_map_produces_correct_results() {
     let run = run_wasm_via_node(&wasm_path);
     assert!(run.status.success(), "node failed to run the wasm module:\n{}", String::from_utf8_lossy(&run.stderr));
     assert_eq!(String::from_utf8_lossy(&run.stdout), "1 4 9 16 25\n");
+}
+
+#[test]
+fn wasm_backend_chained_parallel_map_calls_fuse_and_still_produce_correct_output() {
+    let scratch = scratch_dir("wasm_pmap_fused");
+    let src_path = scratch.join("pmap_fused.kes");
+    fs::write(
+        &src_path,
+        r#"
+        pure fn square(x: i32) -> i32 { return x * x; }
+        pure fn inc(x: i32) -> i32 { return x + 1; }
+        fn main() {
+            let a = parallel_map(square, [1, 2, 3, 4]);
+            let b = parallel_map(inc, a);
+            print(b[0], b[1], b[2], b[3]);
+        }
+        "#,
+    )
+    .unwrap();
+
+    let out = Command::new(kestrelc_bin())
+        .arg("--wasm")
+        .arg(&src_path)
+        .current_dir(&scratch)
+        .output()
+        .expect("failed to run kestrelc");
+    assert!(out.status.success(), "kestrelc --wasm failed:\n{}", String::from_utf8_lossy(&out.stderr));
+
+    let wasm_path = scratch.join("pmap_fused.wasm");
+    let run = run_wasm_via_node(&wasm_path);
+    assert!(run.status.success(), "node failed to run the wasm module:\n{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout), "2 5 10 17\n");
 }
 
 // ============================== type checker ==============================
