@@ -32,6 +32,14 @@ pub struct Codegen {
     str_cache: HashMap<String, StrConst>,
     str_counter: usize,
     where_info: HashMap<String, WhereInfo>,
+    // The host's real C calling convention (System V on Linux/macOS,
+    // Windows x64 on Windows — different register assignments for the
+    // same argument list). Every signature below — Kestrel functions,
+    // printf, the parallel_map runtime shim — must use this, not a
+    // hardcoded convention, or generated code passes arguments in the
+    // wrong registers for whatever `cc` actually links against on this
+    // platform.
+    call_conv: CallConv,
 }
 
 // A recognized `where i < N` clause: `i` names a scalar parameter, `N`
@@ -80,10 +88,25 @@ impl Codegen {
         let mut flag_builder = settings::builder();
         flag_builder.set("is_pic", "true").map_err(|e| CodegenError(e.to_string()))?;
         flag_builder.set("opt_level", "speed").map_err(|e| CodegenError(e.to_string()))?;
+        // Array literals are stack-allocated (see compile_expr's ArrayLit
+        // case) with no upper size limit — a large one (e.g. a
+        // several-thousand-element literal) can blow well past a single
+        // 4KB page in one function's frame. Cranelift's `enable_probestack`
+        // defaults to *off*, which is silently fine on platforms whose
+        // stacks grow more forgivingly, but is a guaranteed
+        // STATUS_ACCESS_VIOLATION crash on Windows: the OS relies on each
+        // stack page being touched in order to lazily grow the stack, and
+        // a big one-shot `sub rsp, N` skips straight past the guard page.
+        // `inline` keeps the probe as plain generated instructions instead
+        // of a call to an external `__probestack` symbol we'd otherwise
+        // have to provide ourselves.
+        flag_builder.set("enable_probestack", "true").map_err(|e| CodegenError(e.to_string()))?;
+        flag_builder.set("probestack_strategy", "inline").map_err(|e| CodegenError(e.to_string()))?;
         let isa_builder = cranelift_native::builder().map_err(|e| CodegenError(e.to_string()))?;
         let isa = isa_builder
             .finish(settings::Flags::new(flag_builder))
             .map_err(|e| CodegenError(e.to_string()))?;
+        let call_conv = isa.default_call_conv();
 
         let obj_builder = ObjectBuilder::new(
             isa,
@@ -99,7 +122,7 @@ impl Codegen {
         // varargs callers must honor only matters when *floating-point*
         // variadic arguments are passed; every Kestrel value here is a
         // plain integer/pointer, so a fixed-arity call site is safe.
-        let mut printf_sig = Signature::new(CallConv::SystemV);
+        let mut printf_sig = Signature::new(call_conv);
         printf_sig.params.push(AbiParam::new(types::I64)); // format string pointer
         printf_sig.params.push(AbiParam::new(types::I64)); // one argument (0 used if unused)
         printf_sig.returns.push(AbiParam::new(types::I32));
@@ -114,7 +137,7 @@ impl Codegen {
         // argument here is a plain 8-byte value on the System V ABI
         // (pointers and i64s alike), so this is exactly as simple to
         // declare as `printf` above.
-        let mut pmap_sig = Signature::new(CallConv::SystemV);
+        let mut pmap_sig = Signature::new(call_conv);
         pmap_sig.params.push(AbiParam::new(types::I64)); // in ptr
         pmap_sig.params.push(AbiParam::new(types::I64)); // len
         pmap_sig.params.push(AbiParam::new(types::I64)); // f (function pointer)
@@ -131,14 +154,15 @@ impl Codegen {
             str_cache: HashMap::new(),
             str_counter: 0,
             where_info: HashMap::new(),
+            call_conv,
         })
     }
 
     // Array-typed parameters occupy two i64 slots in the Cranelift
     // signature (pointer, then length) instead of one — see the Slot
     // enum below for why arrays need two Variables at all.
-    fn fn_signature(program_fn: &Fn) -> Signature {
-        let mut sig = Signature::new(CallConv::SystemV);
+    fn fn_signature(program_fn: &Fn, call_conv: CallConv) -> Signature {
+        let mut sig = Signature::new(call_conv);
         for p in &program_fn.params {
             match &p.ty {
                 Type::Array { .. } => {
@@ -157,7 +181,7 @@ impl Codegen {
         // forward references and recursion) can be resolved regardless
         // of source order.
         for f in program {
-            let sig = Self::fn_signature(f);
+            let sig = Self::fn_signature(f, self.call_conv);
             let id = self
                 .module
                 .declare_function(&f.name, Linkage::Export, &sig)
@@ -177,7 +201,7 @@ impl Codegen {
 
     fn compile_fn(&mut self, f: &Fn) -> Result<(), CodegenError> {
         let func_id = self.fn_ids[&f.name];
-        let sig = Self::fn_signature(f);
+        let sig = Self::fn_signature(f, self.call_conv);
 
         let mut ctx = Context::new();
         ctx.func = Function::with_name_signature(UserFuncName::user(0, func_id.as_u32()), sig);

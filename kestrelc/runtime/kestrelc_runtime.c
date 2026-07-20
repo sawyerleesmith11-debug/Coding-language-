@@ -17,7 +17,27 @@
 
 #include <pthread.h>
 #include <stdlib.h>
+#ifdef _WIN32
+#include <windows.h>
+#else
 #include <unistd.h>
+#endif
+
+// sysconf(_SC_NPROCESSORS_ONLN) is a POSIX/glibc extension MinGW-w64's
+// UCRT doesn't implement — Windows' own answer to "how many logical
+// processors" is GetSystemInfo. Both return the same kind of number
+// (logical processor count, no P-core/E-core distinction), so the
+// len<10000-or-single-core fallback heuristic below behaves identically
+// either way.
+static long kestrelc_nprocs(void) {
+#ifdef _WIN32
+    SYSTEM_INFO info;
+    GetSystemInfo(&info);
+    return (long)info.dwNumberOfProcessors;
+#else
+    return sysconf(_SC_NPROCESSORS_ONLN);
+#endif
+}
 
 typedef struct {
     const long long* in;
@@ -47,7 +67,7 @@ void kestrelc_parallel_map_i64(const long long* in, long long len, long long (*f
         return;
     }
 
-    long nprocs = sysconf(_SC_NPROCESSORS_ONLN);
+    long nprocs = kestrelc_nprocs();
     if (nprocs < 1) {
         nprocs = 1;
     }

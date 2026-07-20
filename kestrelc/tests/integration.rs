@@ -23,6 +23,16 @@ fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf()
 }
 
+// Windows' CRT translates every `\n` a compiled binary writes to stdout
+// into `\r\n` in text mode — a platform difference in the C runtime, not
+// a kestrelc miscompile. Every other backend (run/runFast/kestrelc-web)
+// always emits plain `\n`, so tests compare against `\n`-only expected
+// strings; normalize a native binary's captured stdout the same way
+// before comparing.
+fn native_stdout(run: &std::process::Output) -> String {
+    String::from_utf8_lossy(&run.stdout).replace("\r\n", "\n")
+}
+
 /// Compiles `examples/<name>` with kestrelc inside a scratch dir and
 /// returns (compile succeeded?, compiler stderr, path to the produced
 /// binary if compilation succeeded).
@@ -45,7 +55,7 @@ fn compiles_and_runs_fibonacci_kes_with_correct_output() {
 
     let run = Command::new(&bin).output().expect("failed to run compiled binary");
     assert!(run.status.success(), "compiled fibonacci binary exited with failure");
-    let stdout = String::from_utf8_lossy(&run.stdout);
+    let stdout = native_stdout(&run);
 
     // Same expected output as kestrel.test.js's fibonacci.kes test and
     // the JS backends — all three backends must agree.
@@ -85,7 +95,7 @@ fn compiles_and_runs_basics_kes_with_correct_output() {
 
     let run = Command::new(&bin).output().expect("failed to run compiled binary");
     assert!(run.status.success(), "compiled basics binary exited with failure");
-    let stdout = String::from_utf8_lossy(&run.stdout);
+    let stdout = native_stdout(&run);
 
     let expected = "\
 square: 9
@@ -189,7 +199,7 @@ fn statically_provable_in_bounds_index_still_produces_correct_output() {
 
     let bin = scratch.join("inbounds_static");
     let run = Command::new(&bin).output().expect("failed to run compiled binary");
-    assert_eq!(String::from_utf8_lossy(&run.stdout), "10\n30\n");
+    assert_eq!(native_stdout(&run), "10\n30\n");
 }
 
 #[test]
@@ -220,7 +230,7 @@ fn array_parameter_and_indexing_produce_correct_results() {
 
     let bin = scratch.join("arrparam");
     let run = Command::new(&bin).output().expect("failed to run compiled binary");
-    assert_eq!(String::from_utf8_lossy(&run.stdout), "60\n20\n");
+    assert_eq!(native_stdout(&run), "60\n20\n");
 }
 
 #[test]
@@ -257,7 +267,7 @@ fn recursion_and_arithmetic_produce_correct_results() {
 
     let bin = scratch.join("adhoc");
     let run = Command::new(&bin).output().expect("failed to run compiled binary");
-    assert_eq!(String::from_utf8_lossy(&run.stdout), "610\n14\n1\n3\n");
+    assert_eq!(native_stdout(&run), "610\n14\n1\n3\n");
 }
 
 #[test]
@@ -289,7 +299,7 @@ fn while_loop_with_mutation_produces_correct_result() {
 
     let bin = scratch.join("loopmut");
     let run = Command::new(&bin).output().expect("failed to run compiled binary");
-    assert_eq!(String::from_utf8_lossy(&run.stdout), "4950\n");
+    assert_eq!(native_stdout(&run), "4950\n");
 }
 
 #[test]
@@ -322,7 +332,7 @@ fn where_clause_call_site_proof_accepts_valid_literal_call() {
 
     let bin = scratch.join("where_ok");
     let run = Command::new(&bin).output().expect("failed to run compiled binary");
-    assert_eq!(String::from_utf8_lossy(&run.stdout), "5\n");
+    assert_eq!(native_stdout(&run), "5\n");
 }
 
 #[test]
@@ -663,7 +673,7 @@ fn parallel_map_produces_correct_results_natively() {
 
     let bin = scratch.join("pmap");
     let run = Command::new(&bin).output().expect("failed to run compiled binary");
-    assert_eq!(String::from_utf8_lossy(&run.stdout), "1 4 9 16 25\n");
+    assert_eq!(native_stdout(&run), "1 4 9 16 25\n");
 }
 
 #[test]
@@ -727,7 +737,7 @@ fn parallel_map_is_correct_on_a_large_array_that_crosses_the_real_thread_pool_th
         x
     }
     let expected: i64 = nums.iter().map(|&v| work(v)).sum();
-    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), expected.to_string());
+    assert_eq!(native_stdout(&run).trim(), expected.to_string());
 }
 
 #[test]
@@ -913,7 +923,7 @@ fn typecheck_does_not_flag_a_boolean_returning_function_used_as_a_condition() {
 
     let bin = scratch.join("prog");
     let run = Command::new(&bin).output().expect("failed to run compiled binary");
-    assert_eq!(String::from_utf8_lossy(&run.stdout), "even\n");
+    assert_eq!(native_stdout(&run), "even\n");
 }
 
 #[test]
