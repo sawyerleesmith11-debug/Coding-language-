@@ -103,7 +103,12 @@ calls are now memoized too, in both JS backends (`run` and `runFast`)
 — a repeated call with identical arguments returns the cached result
 instead of re-executing, scoped to a single run, always safe per the
 purity proof. `kestrelc` doesn't memoize yet — JS-backends-first, a
-known gap. Next up, in priority order: extending position-tracking to
-the rest of the compiler's error stages, pure-function loop fusion, the
-fuller profile-guided cache, and layout polymorphism (blocked on
-structs, which don't exist yet).
+known gap. A narrow form of pure-function loop fusion is also in now
+(JS backends): a chain of `parallel_map` calls where each one's array
+comes straight from the previous one's result fuses into a single pass
+with a synthesized function, instead of materializing an intermediate
+array per step — see `kestrel-DESIGN.md` for exactly which shapes
+trigger it. Next up, in priority order: extending position-tracking to
+the rest of the compiler's error stages, bringing memoization and loop
+fusion to `kestrelc`, the fuller profile-guided cache, and layout
+polymorphism (blocked on structs, which don't exist yet).

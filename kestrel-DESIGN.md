@@ -382,17 +382,37 @@ before stringifying to keep those cases from colliding on the same key.
 at all yet — this is JS-backends-first, matching the project's usual
 pattern of new semantics landing there before the native compiler.
 
+**Loop fusion, shipped (JS backends only, narrow shape):** both `run`
+and `runFast` now fuse a chain of `let a = parallel_map(f, arr); let b
+= parallel_map(g, a);` — with `a` used nowhere else in the function —
+into one `parallel_map` over `arr` with a synthesized pure fn computing
+`g(f(x))`, one pass and no intermediate array instead of two. Runs as
+an AST-to-AST pass (`fuseLoops`) after purity/type/parallel_map checks
+pass on the original program, so both backends share one
+implementation instead of duplicating the optimization. Safe by
+construction: `f` and `g` are already proven pure, and the synthesized
+function is a trivial composition of two already-pure functions, not a
+new proof. Chains fuse transitively (a 3-deep chain collapses to one
+function), and it also fires inside `if`/`while` bodies, not just at
+top level. **Scope, honestly:** deliberately narrow — only this exact
+adjacent-`let` shape triggers it. A chain split across other
+statements, an intermediate array referenced more than once, or a
+source that isn't a bare `parallel_map` call are all left unfused
+rather than guessed at. `kestrelc` does not fuse anything (it doesn't
+even have `parallel_map` chains as a concept yet at the IR level).
+General loop fusion beyond `parallel_map` chains specifically (e.g. a
+plain `while`-loop calling multiple pure fns per iteration) is still
+unaddressed.
+
 Not yet implemented (future work, roughly in priority order):
 1. Full per-expression position tracking (statement-level line is now
    in place for purity/type errors, see above) — a `file:line:col:` +
    caret for those stages too needs a span on every AST node, not just
    statements. Also: bringing any of this to `kestrelc`'s own checkers,
    and to runtime errors in every backend.
-2. Pure-function loop fusion, extending idea #2/#4's purity proof the
-   same way `parallel_map` (idea #5) already does — turning a chain of
-   `pure fn` calls over an array into one pass instead of several.
-   Memoization (the other half of this idea) is now shipped, see above.
-   Also: bringing memoization itself to `kestrelc`.
+2. Bringing memoization and `parallel_map`-chain fusion (both shipped
+   in the JS backends, see above) to `kestrelc`. Also: generalizing
+   fusion beyond the current narrow adjacent-`let` shape.
 3. Proof-based bounds-check *elision* in `kestrelc` — **the design
    doc's own `get_safe` example now works exactly as originally
    specified**: `where i < N` is proven at every call site (a literal

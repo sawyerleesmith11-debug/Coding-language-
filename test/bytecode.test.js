@@ -243,6 +243,34 @@ describe("VM internals", () => {
   });
 });
 
+describe("loop fusion (runFast)", () => {
+  test("chained parallel_map calls fuse and both backends agree", () => {
+    assertEquivalent(`
+      pure fn square(x: i32) -> i32 { return x * x; }
+      pure fn inc(x: i32) -> i32 { return x + 1; }
+      fn main() {
+        let a = parallel_map(square, [1, 2, 3, 4]);
+        let b = parallel_map(inc, a);
+        print(b[0], b[1], b[2], b[3]);
+      }
+    `);
+  });
+
+  test("three-deep chain fuses and both backends agree", () => {
+    assertEquivalent(`
+      pure fn a1(x: i32) -> i32 { return x + 1; }
+      pure fn a2(x: i32) -> i32 { return x * 2; }
+      pure fn a3(x: i32) -> i32 { return x - 3; }
+      fn main() {
+        let p = parallel_map(a1, [1, 2, 3]);
+        let q = parallel_map(a2, p);
+        let r = parallel_map(a3, q);
+        print(r[0], r[1], r[2]);
+      }
+    `);
+  });
+});
+
 describe("pure fn memoization (runFast)", () => {
   // Same guarantees as run()'s memoization, checked against the bytecode
   // VM's own call-stack-based CALL/RETURN memo bookkeeping.

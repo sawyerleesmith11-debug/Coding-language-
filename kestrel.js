@@ -480,6 +480,118 @@ function checkParallelMap(program) {
   return errors;
 }
 
+// ============================== LOOP FUSION ==============================
+// A narrow, provably-safe optimization on top of idea #5's purity-backed
+// parallel_map: `let a = parallel_map(f, arr); let b = parallel_map(g, a);`,
+// with `a` referenced nowhere else, becomes a single parallel_map over `arr`
+// with a synthesized pure fn computing g(f(x)) — one pass and no
+// intermediate array instead of two. Safe because `f` and `g` are already
+// proven pure (this only runs after checkPurity/checkParallelMap/checkTypes
+// have all passed on the *original* program), and the synthesized fn is a
+// trivial composition of two already-pure functions, not a new proof.
+//
+// Deliberately narrow, per kestrel-DESIGN.md: only fires on this exact
+// adjacent-statement shape (both `let`s back to back, second's array arg is
+// exactly the first's bound variable, and that variable is used nowhere
+// else in the function). A chain split across other statements, an `a`
+// used twice, or a source array that isn't a bare `parallel_map` call are
+// all left alone rather than guessed at. Runs on `if`/`while` bodies too,
+// and re-checks its own output so a 3+-deep chain fuses all the way down.
+let fusionCounter = 0;
+
+function countIdentRefs(stmts, name) {
+  let count = 0;
+  function inExpr(e) {
+    if (!e) return;
+    switch (e.kind) {
+      case "ident": if (e.name === name) count++; break;
+      case "call": e.args.forEach(inExpr); break;
+      case "binop": inExpr(e.left); inExpr(e.right); break;
+      case "unary": inExpr(e.expr); break;
+      case "index": inExpr(e.target); inExpr(e.index); break;
+      case "array_lit": e.elems.forEach(inExpr); break;
+      default: break;
+    }
+  }
+  function inStmt(s) {
+    switch (s.kind) {
+      case "let": inExpr(s.value); break;
+      case "assign": if (s.name === name) count++; inExpr(s.value); break;
+      case "if": inExpr(s.cond); s.thenBlock.forEach(inStmt);
+        if (s.elseBlock) s.elseBlock.forEach(inStmt); break;
+      case "while": inExpr(s.cond); s.body.forEach(inStmt); break;
+      case "print": s.args.forEach(inExpr); break;
+      case "return": if (s.value) inExpr(s.value); break;
+      case "expr_stmt": inExpr(s.expr); break;
+    }
+  }
+  stmts.forEach(inStmt);
+  return count;
+}
+
+function isParallelMapCall(e) {
+  return e && e.kind === "call" && e.name === "parallel_map" &&
+    e.args.length === 2 && e.args[0].kind === "ident";
+}
+
+function fuseLoops(program) {
+  const fns = new Map(program.map((f) => [f.name, f]));
+  const extraFns = [];
+
+  function fuseBody(body) {
+    for (let i = 0; i < body.length - 1; i++) {
+      const s1 = body[i], s2 = body[i + 1];
+      if (s1.kind !== "let" || !isParallelMapCall(s1.value)) continue;
+      if (s2.kind !== "let" || !isParallelMapCall(s2.value)) continue;
+      const arrArg2 = s2.value.args[1];
+      if (arrArg2.kind !== "ident" || arrArg2.name !== s1.name) continue;
+      // The only allowed reference to `a` is the one inside s2's own
+      // parallel_map call (that's the "1" this counts) — anything more
+      // means `a` escapes this fusion and must stay materialized.
+      if (countIdentRefs(body, s1.name) !== 1) continue;
+
+      const fName = s1.value.args[0].name;
+      const gName = s2.value.args[0].name;
+      const fFn = fns.get(fName), gFn = fns.get(gName);
+      if (!fFn || !gFn || !fFn.pure || !gFn.pure) continue;
+      if (fFn.params.length !== 1 || gFn.params.length !== 1) continue;
+
+      const fusedName = `__fused_${fusionCounter++}_${fName}_${gName}`;
+      const fusedFn = {
+        kind: "fn",
+        name: fusedName,
+        pure: true,
+        params: [{ name: "__x", type: fFn.params[0].type }],
+        returnType: gFn.returnType,
+        where: null,
+        body: [{
+          kind: "return",
+          value: { kind: "call", name: gName, args: [{ kind: "call", name: fName, args: [{ kind: "ident", name: "__x" }] }] },
+          line: s2.line,
+        }],
+      };
+      fns.set(fusedName, fusedFn);
+      extraFns.push(fusedFn);
+
+      const arrArg = s1.value.args[1];
+      body[i] = {
+        kind: "let", name: s2.name,
+        value: { kind: "call", name: "parallel_map", args: [{ kind: "ident", name: fusedName }, arrArg] },
+        line: s2.line,
+      };
+      body.splice(i + 1, 1);
+      i--; // re-check this slot: a 3rd chained parallel_map now sits right after it
+    }
+    for (const s of body) {
+      if (s.kind === "if") { fuseBody(s.thenBlock); if (s.elseBlock) fuseBody(s.elseBlock); }
+      if (s.kind === "while") fuseBody(s.body);
+    }
+  }
+
+  for (const fn of program) fuseBody(fn.body);
+  return program.concat(extraFns);
+}
+
 // ============================== TYPE CHECKER ==============================
 // First honest version — see kestrel-DESIGN.md's roadmap for exactly what
 // this is and isn't. Types are still just written, not checked, as
@@ -1269,7 +1381,8 @@ function run(src, opts = {}) {
     throw new KestrelError("Type check failed:\n  " + typeErrors.join("\n  "));
   }
   const boundsNotes = checkBounds(program);
-  const result = interpret(program, opts);
+  const fused = fuseLoops(program);
+  const result = interpret(fused, opts);
   return { result, boundsNotes };
 }
 
@@ -1294,7 +1407,8 @@ function runFast(src, opts = {}) {
     throw new KestrelError("Type check failed:\n  " + typeErrors.join("\n  "));
   }
   const boundsNotes = checkBounds(program);
-  const functions = compile(program);
+  const fused = fuseLoops(program);
+  const functions = compile(fused);
   const onPrint = opts.onPrint || ((s) => console.log(s));
   const result = execute(functions, "main", [], onPrint);
   return { result, boundsNotes };
@@ -1303,7 +1417,7 @@ function runFast(src, opts = {}) {
 // Export for Node; in the browser this file is loaded as a plain
 // <script>, and `Kestrel` is used as a global instead.
 const Kestrel = {
-  lex, parse, checkPurity, checkBounds, checkParallelMap, checkTypes, interpret, run,
+  lex, parse, checkPurity, checkBounds, checkParallelMap, checkTypes, fuseLoops, interpret, run,
   compile, execute, runFast,
   KestrelError, formatKestrelError,
 };

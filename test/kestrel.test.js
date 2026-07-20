@@ -555,6 +555,68 @@ describe("purity/type errors carry a line number", () => {
   });
 });
 
+describe("loop fusion", () => {
+  test("two chained parallel_map calls fuse into one function", () => {
+    const src = `
+      pure fn square(x: i32) -> i32 { return x * x; }
+      pure fn inc(x: i32) -> i32 { return x + 1; }
+      fn main() {
+        let a = parallel_map(square, [1, 2, 3, 4]);
+        let b = parallel_map(inc, a);
+        print(b[0], b[1], b[2], b[3]);
+      }
+    `;
+    const { output } = runCollect(src);
+    assert.deepEqual(output, ["2 5 10 17"]);
+    const fused = Kestrel.fuseLoops(Kestrel.parse(Kestrel.lex(src)));
+    assert.equal(fused.length, 4, "should have added exactly one fused function");
+    assert.ok(fused.some((f) => f.name.startsWith("__fused_")));
+  });
+
+  test("a three-deep chain fuses all the way down to one function", () => {
+    const src = `
+      pure fn a1(x: i32) -> i32 { return x + 1; }
+      pure fn a2(x: i32) -> i32 { return x * 2; }
+      pure fn a3(x: i32) -> i32 { return x - 3; }
+      fn main() {
+        let p = parallel_map(a1, [1, 2, 3]);
+        let q = parallel_map(a2, p);
+        let r = parallel_map(a3, q);
+        print(r[0], r[1], r[2]);
+      }
+    `;
+    const { output } = runCollect(src);
+    assert.deepEqual(output, ["1 3 5"]);
+  });
+
+  test("does not fuse when the intermediate array is used more than once", () => {
+    const src = `
+      pure fn sq(x: i32) -> i32 { return x * x; }
+      pure fn inc(x: i32) -> i32 { return x + 1; }
+      fn main() {
+        let a = parallel_map(sq, [1, 2, 3]);
+        let b = parallel_map(inc, a);
+        print(a[0], b[0]);
+      }
+    `;
+    const { output } = runCollect(src);
+    assert.deepEqual(output, ["1 2"]);
+    const fused = Kestrel.fuseLoops(Kestrel.parse(Kestrel.lex(src)));
+    assert.equal(fused.length, 3, "no fused function should be added");
+  });
+
+  test("a single (unchained) parallel_map is left alone", () => {
+    const { output } = runCollect(`
+      pure fn square(x: i32) -> i32 { return x * x; }
+      fn main() {
+        let a = parallel_map(square, [1, 2, 3]);
+        print(a[0], a[1], a[2]);
+      }
+    `);
+    assert.deepEqual(output, ["1 4 9"]);
+  });
+});
+
 describe("pure fn memoization", () => {
   // A `pure fn` cannot observe or be affected by any other call to itself
   // (no I/O, no calls to impure fns, no mutation outside its own locals),
