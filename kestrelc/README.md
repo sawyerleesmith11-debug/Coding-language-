@@ -85,6 +85,12 @@ Codegen, however, currently supports a subset:
   integer literals so far"), not silently truncated
 - Functions, including recursion, and `pure fn` (checked, same rules and
   error messages as `kestrel.js`)
+- A first, honestly-scoped **type checker**: infers each expression's
+  value kind (integer vs. boolean) from literals and operators, and
+  rejects mixing them (`5 + true`, `if (5) {...}`) or calling a
+  function with the wrong argument count. Doesn't yet check declared
+  parameter type names against call-site arguments — see
+  `docs/SYNTAX.md`'s "Type checking" section.
 - `let`, assignment, `if`/`else`, `while`
 - Arithmetic (`+ - * / %`), comparisons, `&&`/`||` (not short-circuiting,
   matching the other two backends)

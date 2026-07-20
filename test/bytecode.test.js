@@ -101,6 +101,11 @@ describe("runFast() equivalence with run()", () => {
     `);
   });
 
+  test("checkTypes rejects the same ill-typed programs on both backends", () => {
+    assert.throws(() => Kestrel.run(`fn main() { print(5 + true); }`), /needs two numbers/);
+    assert.throws(() => Kestrel.runFast(`fn main() { print(5 + true); }`), /needs two numbers/);
+  });
+
   test("a `let` inside an if-branch stays visible after it (flat scope)", () => {
     // Regression check for the VM's slot allocation: Kestrel has no block
     // scoping, so a `let` declared inside an `if` must still be readable
