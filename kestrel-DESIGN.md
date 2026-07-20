@@ -571,6 +571,28 @@ inlining it directly — same optimization, output shaped to what this
 backend's codegen actually accepts. `kestrelc` now memoizes too (a
 separate optimization from fusion) — see the memoization section above.
 
+**Name resolution pass, shipped (`kestrelc/src/resolve.rs`):** the
+biggest item left from this round's architecture discussion. Before
+this, `purity.rs`, `typecheck.rs`, `codegen.rs`, and `wasm_codegen.rs`
+each built their own identical `HashMap<Symbol, &Fn>` from the same
+program, and only `codegen.rs`/`wasm_codegen.rs` — duplicated between
+the two backends, at the last possible stage — ever caught an unknown
+identifier or an unknown function call; `purity.rs`/`typecheck.rs`
+passed both silently. `resolve.rs` builds that table once (shared by
+every stage now) and resolves every name in one pass, right after
+parsing, before any checker runs, so a resolution problem is reported
+alongside (not instead of) purity/type errors instead of only surfacing
+on whichever backend you happened to compile to. It also catches
+something nothing previously did at all: two functions sharing a name —
+previously silent (last definition wins) except for a confusing,
+position-less internal error surfacing from deep inside codegen
+(`Duplicate definition of identifier: __kprofile_counter_<name>`, a
+linker-symbol collision from the profiling counter, not anything that
+named the actual problem). Deliberately out of scope, matching every
+other stage's existing boundary: a `where` clause's expression isn't
+resolved here either, since `where_info.rs` is the only thing that reads
+it, at codegen time, unchecked by purity/type-check today too.
+
 Not yet implemented (future work, roughly in priority order):
 1. Full per-expression position tracking — purity/type/codegen errors,
    in both the JS backends *and* every one of `kestrelc`'s own stages

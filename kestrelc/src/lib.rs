@@ -5,6 +5,7 @@ pub mod interner;
 pub mod lexer;
 pub mod parser;
 pub mod purity;
+pub mod resolve;
 pub mod span;
 pub mod typecheck;
 pub mod wasm_codegen;
@@ -55,7 +56,18 @@ pub fn compile_to_wasm_bytes(src: &str) -> Result<Vec<u8>, String> {
     let program = parser::parse(tokens)
         .map_err(|e| format_diagnostic(src, "<input>", e.span.line, e.span.col, e.span.len, &e.message))?;
 
-    let purity_errors = purity::check_purity(&program);
+    let fns = resolve::build_fn_table(&program);
+
+    let resolve_errors = resolve::resolve(&program, &fns);
+    if !resolve_errors.is_empty() {
+        let msgs: Vec<String> = resolve_errors
+            .iter()
+            .map(|e| format_diagnostic(src, "<input>", e.span.line, e.span.col, 1, &e.message))
+            .collect();
+        return Err(format!("Name resolution failed:\n  {}", msgs.join("\n  ")));
+    }
+
+    let purity_errors = purity::check_purity(&program, &fns);
     if !purity_errors.is_empty() {
         let msgs: Vec<String> = purity_errors
             .iter()
@@ -64,7 +76,7 @@ pub fn compile_to_wasm_bytes(src: &str) -> Result<Vec<u8>, String> {
         return Err(format!("Purity check failed:\n  {}", msgs.join("\n  ")));
     }
 
-    let pmap_errors = purity::check_parallel_map(&program);
+    let pmap_errors = purity::check_parallel_map(&program, &fns);
     if !pmap_errors.is_empty() {
         let msgs: Vec<String> = pmap_errors
             .iter()
@@ -73,7 +85,7 @@ pub fn compile_to_wasm_bytes(src: &str) -> Result<Vec<u8>, String> {
         return Err(format!("parallel_map() check failed:\n  {}", msgs.join("\n  ")));
     }
 
-    let type_errors = typecheck::check_types(&program);
+    let type_errors = typecheck::check_types(&program, &fns);
     if !type_errors.is_empty() {
         let msgs: Vec<String> = type_errors
             .iter()

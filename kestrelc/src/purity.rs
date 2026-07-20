@@ -9,8 +9,7 @@ use crate::interner::Symbol;
 use crate::span::Span;
 use std::collections::{HashMap, HashSet};
 
-pub fn check_purity(program: &Program) -> Vec<KestrelcError> {
-    let fns: HashMap<Symbol, &Fn> = program.iter().map(|f| (f.name, f)).collect();
+pub fn check_purity(program: &Program, fns: &HashMap<Symbol, &Fn>) -> Vec<KestrelcError> {
     let mut impure_cache: HashMap<Symbol, bool> = HashMap::new();
 
     fn is_impure<'a>(
@@ -139,7 +138,7 @@ pub fn check_purity(program: &Program) -> Vec<KestrelcError> {
     for fn_ in program {
         if fn_.pure {
             let mut stack = HashSet::new();
-            if is_impure(fn_, &fns, &mut impure_cache, &mut stack) {
+            if is_impure(fn_, fns, &mut impure_cache, &mut stack) {
                 errors.push(KestrelcError::new(
                     ErrorKind::Purity,
                     format!(
@@ -163,8 +162,7 @@ pub fn check_purity(program: &Program) -> Vec<KestrelcError> {
 /// bodies, unlike `check_purity`) since misusing it is a bug regardless
 /// of the caller's own purity. Direct port of kestrel.js's
 /// `checkParallelMap` — same rules, same wording.
-pub fn check_parallel_map(program: &Program) -> Vec<KestrelcError> {
-    let fns: HashMap<Symbol, &Fn> = program.iter().map(|f| (f.name, f)).collect();
+pub fn check_parallel_map(program: &Program, fns: &HashMap<Symbol, &Fn>) -> Vec<KestrelcError> {
     let mut errors = Vec::new();
 
     // `span` is the *enclosing statement's* span, not the exact
@@ -265,7 +263,7 @@ pub fn check_parallel_map(program: &Program) -> Vec<KestrelcError> {
 
     for fn_ in program {
         for s in &fn_.body {
-            visit_stmt(s, &fns, &mut errors);
+            visit_stmt(s, fns, &mut errors);
         }
     }
     errors

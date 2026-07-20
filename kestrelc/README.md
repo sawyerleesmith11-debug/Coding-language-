@@ -92,8 +92,8 @@ they're all one small `Copy` struct.
 
 Every stage's error type is unified too, into one
 `error::KestrelcError { kind, message, span }` (`kind` a small
-discriminant-only `ErrorKind` — `Lex`, `Parse`, `Purity`, `ParallelMap`,
-`Type`, `Codegen`), instead of five separate structs (`LexError`,
+discriminant-only `ErrorKind` — `Lex`, `Parse`, `Resolve`, `Purity`,
+`ParallelMap`, `Type`, `Codegen`), instead of five separate structs (`LexError`,
 `ParseError`, a purity/type `CheckError`, and one codegen error type per
 backend) that all carried the same message-and-position shape. `main.rs`
 renders every one of them through the same two small helpers
@@ -114,6 +114,25 @@ per-expression — `let x = f(a) + g(b);` points at the start of the
 every backend's runtime errors (unknown identifier, out-of-bounds
 index, etc.) still don't carry a source position at all. See
 `kestrel-DESIGN.md`'s roadmap for what's left.
+
+## Name resolution
+
+Before compiling anything, `src/resolve.rs` walks the whole program once:
+builds the `name -> Fn` table every later stage needs (previously
+rebuilt separately, identically, in `purity.rs`, `typecheck.rs`,
+`codegen.rs`, and `wasm_codegen.rs`), flags two functions sharing a name
+(previously silent — last definition wins — except for a confusing
+internal linker error surfacing from deep inside codegen with no useful
+position), and resolves every identifier read, function call, and
+assignment target against each function's own locals. Unknown-name
+errors used to only ever be caught by whichever backend's codegen you
+happened to compile to (duplicated between the native and WASM
+backends); now they're one shared check, reported as `ErrorKind::Resolve`
+alongside purity/type errors instead of only showing up at the last
+stage. Out of scope, matching every other stage's existing boundary: a
+`where` clause's expression isn't resolved here — `where_info.rs` is the
+only thing that reads it, at codegen time, and it isn't checked by
+purity/type-check either.
 
 ## String interning
 
