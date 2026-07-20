@@ -178,6 +178,9 @@ pub fn check_parallel_map(program: &Program) -> Vec<String> {
                             "parallel_map(): '{func_name}' must take exactly one parameter (one array element in, one result out), has {}",
                             callee.params.len()
                         )),
+                        Some(callee) if !matches!(callee.params[0].ty, Type::Named(_)) => errors.push(format!(
+                            "parallel_map(): '{func_name}'s parameter must be a scalar (one array element), not an array"
+                        )),
                         Some(_) => {}
                     },
                     _ => errors.push(

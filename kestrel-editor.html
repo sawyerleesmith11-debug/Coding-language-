@@ -625,6 +625,8 @@ function checkParallelMap(program) {
               errors.push(`parallel_map(): '${funcArg.name}' must be a 'pure fn' — parallel safety comes entirely from the purity proof`);
             } else if (callee.params.length !== 1) {
               errors.push(`parallel_map(): '${funcArg.name}' must take exactly one parameter (one array element in, one result out), has ${callee.params.length}`);
+            } else if (callee.params[0].type.kind !== "named") {
+              errors.push(`parallel_map(): '${funcArg.name}''s parameter must be a scalar (one array element), not an array`);
             }
           }
           visitExpr(e.args[1]);

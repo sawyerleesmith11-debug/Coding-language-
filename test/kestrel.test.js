@@ -388,6 +388,16 @@ describe("parallel_map()", () => {
     );
   });
 
+  test("rejects a function whose parameter is an array, not a scalar", () => {
+    assert.throws(
+      () => Kestrel.run(`
+        pure fn sum3(a: [i32; N]) -> i32 { return a[0] + a[1] + a[2]; }
+        fn main() { let a = [1, 2, 3]; let b = parallel_map(sum3, a); print(b[0]); }
+      `),
+      /must be a scalar/
+    );
+  });
+
   test("rejects an unknown function name", () => {
     assert.throws(
       () => Kestrel.run(`fn main() { let a = [1, 2]; let b = parallel_map(nosuchfn, a); print(b[0]); }`),

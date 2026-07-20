@@ -113,7 +113,7 @@ to an explicitly-checked variant of the function.
 
 ## 5. Fearless parallelism, powered by purity
 
-**Status: extension of known ideas (Rust's Rayon/fork-join, auto-vectorization)**
+**Status: extension of known ideas (Rust's Rayon/fork-join, auto-vectorization) — first real version implemented**
 
 Most languages that let you spread work across CPU cores make you prove
 it's safe by hand — audit the code for shared mutable state, add locks,
@@ -130,6 +130,43 @@ compiler to automatically split the work across available CPU cores,
 no `unsafe`, no manual thread-safety audit, no opt-in required beyond
 having written `pure` in the first place (which you'd want to do anyway,
 for the reasons in idea #2).
+
+**What's implemented:** `parallel_map(f, arr)` — a reserved builtin call
+name (like `print`), not a new keyword, so it needed zero grammar
+changes. `f` must be a `pure fn` taking exactly one scalar parameter;
+misuse (non-pure, wrong arity, an array parameter, an unknown function,
+or a non-identifier first argument) is a compile error in every
+backend, not a runtime surprise. Every backend accepts the same
+programs — `run`/`runFast` (JS, single-threaded) and the WASM backend
+apply `f` sequentially, since neither has real threads available
+(kestrel.js's are a correctness oracle: proof of the *right answer* to
+check the real implementation against); **`kestrelc`'s native backend
+is the one that actually parallelizes**, via a small C runtime shim
+(`kestrelc/runtime/kestrelc_runtime.c`, linked into every native build)
+that spins up real OS threads with `pthread_create`, one chunk of the
+array per available CPU core, calling straight back into the
+Cranelift-compiled `pure fn` from each thread. Below a size threshold
+(currently 10,000 elements) or on a single-core machine, it runs inline
+instead — thread setup/teardown would cost more than it saves, a real
+instance of the "heuristics for when splitting is worth it" trade-off
+named below, not a hypothetical one anymore.
+
+Measured on this machine (4 logical CPUs), a CPU-heavy `pure fn` applied
+to a 20,000-element array via `parallel_map`, external-process/best-of-N
+timed against an equivalent hand-written sequential C loop doing the
+identical work: **~2.1x faster**, consistently across both a light and
+a 40x-heavier per-element workload. That's real speedup, honestly
+below the ideal ~4x for 4 cores — some combination of thread
+overhead, memory bandwidth, and this being a shared/virtualized
+container rather than dedicated hardware, most likely; take the exact
+multiplier as this-machine-specific, not a universal claim.
+
+Current scope, honestly: the array being mapped over must be a
+fixed-size array *literal* (`let x = [...]`), not a parameter — the
+output array's size has to be known at compile time since it's a plain
+stack allocation, same restriction the bounds-elision proof (idea #4)
+already has for its literal-length fast path. See `kestrelc/README.md`
+for the exact rules and error messages.
 
 Two further-out extensions of the same idea, roughly in order of how
 soon they're realistic:
@@ -149,11 +186,10 @@ soon they're realistic:
 `pure` and operating over genuinely independent chunks of work.
 Sequentially-dependent code (naive recursive Fibonacci is the running
 example throughout this doc) has nothing to split up and sees no
-benefit. This also isn't a free unlock the moment the native backend
-exists — it's real additional engineering (a work-stealing scheduler,
-heuristics for when splitting the work is actually worth its own
-overhead, eventually a GPU backend) that comes after the native
-compiler, not alongside it.
+benefit. The current implementation is also still narrow — one thread
+pool, one fixed size threshold, no work-stealing, only over an array
+literal — real additional engineering beyond this first version, not a
+finished scheduler.
 
 ---
 
@@ -307,11 +343,15 @@ Not yet implemented (future work, roughly in priority order):
 2. The full runtime-profile-guided version of the persistent cache (idea
    #1) — the on-disk/in-memory *compile-result* cache is done; branch/
    shape profiling and pre-specialization from it are not
-3. Layout polymorphism
+3. Layout polymorphism — blocked on structs/records existing at all
+   (Kestrel doesn't have them yet — see `docs/SYNTAX.md`), a
+   prerequisite bigger than the layout-choice optimization itself
 4. A more general proof system beyond simple bounds checks
-5. CPU-side parallelism for `pure` functions over collections (idea #5)
-   — now unblocked, since `kestrelc` generates real machine code
-6. SIMD, then (much further out) a GPU backend — both extensions of (5)
+5. SIMD, then (much further out) a GPU backend — both extensions of
+   idea #5's CPU-parallelism work, which now has a first real version
+   (`parallel_map`, native backend only — see idea #5 above); a
+   general-purpose work-stealing scheduler beyond the current one
+   thread-pool/one-threshold implementation is also still open
 
 (`runFast`'s recursion overhead, formerly listed here, is resolved — see
 the benchmark table above.)

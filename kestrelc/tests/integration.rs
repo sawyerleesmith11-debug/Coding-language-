@@ -634,3 +634,192 @@ fn compile_cache_misses_when_source_changes() {
         "changed source should not hit the previous entry's cache"
     );
 }
+
+// ============================== parallel_map ==============================
+
+#[test]
+fn parallel_map_produces_correct_results_natively() {
+    let scratch = scratch_dir("pmap_native");
+    let src_path = scratch.join("pmap.kes");
+    fs::write(
+        &src_path,
+        r#"
+        pure fn square(x: i32) -> i32 { return x * x; }
+        fn main() {
+            let nums = [1, 2, 3, 4, 5];
+            let squares = parallel_map(square, nums);
+            print(squares[0], squares[1], squares[2], squares[3], squares[4]);
+        }
+        "#,
+    )
+    .unwrap();
+
+    let out = Command::new(kestrelc_bin())
+        .arg(&src_path)
+        .current_dir(&scratch)
+        .output()
+        .expect("failed to run kestrelc");
+    assert!(out.status.success(), "compile failed:\n{}", String::from_utf8_lossy(&out.stderr));
+
+    let bin = scratch.join("pmap");
+    let run = Command::new(&bin).output().expect("failed to run compiled binary");
+    assert_eq!(String::from_utf8_lossy(&run.stdout), "1 4 9 16 25\n");
+}
+
+#[test]
+fn parallel_map_is_correct_on_a_large_array_that_crosses_the_real_thread_pool_threshold() {
+    // kestrelc_runtime.c only spins up real OS threads above a size
+    // threshold (see runtime/kestrelc_runtime.c) — below it, running
+    // inline is faster than thread setup/teardown. This array is large
+    // enough to force the actual multi-threaded chunked path, which is
+    // exactly the code a small correctness test wouldn't exercise.
+    let scratch = scratch_dir("pmap_large");
+    let src_path = scratch.join("pmap_large.kes");
+
+    let n: i64 = 20_000;
+    let nums: Vec<i64> = (0..n).map(|i| ((i * 2654435761) % 2001) - 1000).collect();
+    let literal = nums.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(", ");
+    let src = format!(
+        r#"
+        pure fn work(x: i32) -> i32 {{
+            let i = 0;
+            let acc = x;
+            while (i < 200) {{
+                acc = (acc * 17 + 23) % 1000003;
+                i = i + 1;
+            }}
+            return acc;
+        }}
+        fn main() {{
+            let nums = [{literal}];
+            let results = parallel_map(work, nums);
+            let total = 0;
+            let i = 0;
+            while (i < {n}) {{
+                total = total + results[i];
+                i = i + 1;
+            }}
+            print(total);
+        }}
+        "#
+    );
+    fs::write(&src_path, &src).unwrap();
+
+    let out = Command::new(kestrelc_bin())
+        .arg(&src_path)
+        .current_dir(&scratch)
+        .output()
+        .expect("failed to run kestrelc");
+    assert!(out.status.success(), "compile failed:\n{}", String::from_utf8_lossy(&out.stderr));
+
+    let bin = scratch.join("pmap_large");
+    let run = Command::new(&bin).output().expect("failed to run compiled binary");
+    assert!(run.status.success(), "compiled binary exited with failure");
+
+    // Reference value, computed independently in Rust with the same
+    // truncating-toward-zero remainder semantics kestrelc's `srem`/C's
+    // `%` use (not Python's/most languages' floored mod) — this is the
+    // correctness oracle the native binary's output is checked against.
+    fn work(mut x: i64) -> i64 {
+        for _ in 0..200 {
+            x = (x * 17 + 23) % 1000003;
+        }
+        x
+    }
+    let expected: i64 = nums.iter().map(|&v| work(v)).sum();
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), expected.to_string());
+}
+
+#[test]
+fn parallel_map_rejects_a_non_pure_function() {
+    let scratch = scratch_dir("pmap_impure");
+    let src_path = scratch.join("pmap_impure.kes");
+    fs::write(
+        &src_path,
+        r#"
+        fn notpure(x: i32) -> i32 { print(x); return x; }
+        fn main() {
+            let nums = [1, 2, 3];
+            let out = parallel_map(notpure, nums);
+            print(out[0]);
+        }
+        "#,
+    )
+    .unwrap();
+
+    let out = Command::new(kestrelc_bin())
+        .arg(&src_path)
+        .current_dir(&scratch)
+        .output()
+        .expect("failed to run kestrelc");
+    assert!(!out.status.success(), "kestrelc should have rejected a non-pure parallel_map callee");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("must be a 'pure fn'"), "expected the purity error, got:\n{stderr}");
+}
+
+#[test]
+fn parallel_map_rejects_an_array_parameter_source_array() {
+    // The output array's size has to be known at compile time (it's a
+    // stack allocation) — only supported for a literal-length array
+    // source (a `let` array literal), not one passed in as a parameter.
+    let scratch = scratch_dir("pmap_param_arr");
+    let src_path = scratch.join("pmap_param_arr.kes");
+    fs::write(
+        &src_path,
+        r#"
+        pure fn square(x: i32) -> i32 { return x * x; }
+        fn map_it(arr: [i32; N]) -> i32 {
+            let out = parallel_map(square, arr);
+            return out[0];
+        }
+        fn main() {
+            let nums = [1, 2, 3];
+            print(map_it(nums));
+        }
+        "#,
+    )
+    .unwrap();
+
+    let out = Command::new(kestrelc_bin())
+        .arg(&src_path)
+        .current_dir(&scratch)
+        .output()
+        .expect("failed to run kestrelc");
+    assert!(!out.status.success(), "kestrelc should have rejected parallel_map over an array parameter");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("fixed-size array literal"),
+        "expected the literal-length-array-only error, got:\n{stderr}"
+    );
+}
+
+#[test]
+fn wasm_backend_parallel_map_produces_correct_results() {
+    let scratch = scratch_dir("wasm_pmap");
+    let src_path = scratch.join("pmap.kes");
+    fs::write(
+        &src_path,
+        r#"
+        pure fn square(x: i32) -> i32 { return x * x; }
+        fn main() {
+            let nums = [1, 2, 3, 4, 5];
+            let squares = parallel_map(square, nums);
+            print(squares[0], squares[1], squares[2], squares[3], squares[4]);
+        }
+        "#,
+    )
+    .unwrap();
+
+    let out = Command::new(kestrelc_bin())
+        .arg("--wasm")
+        .arg(&src_path)
+        .current_dir(&scratch)
+        .output()
+        .expect("failed to run kestrelc");
+    assert!(out.status.success(), "kestrelc --wasm failed:\n{}", String::from_utf8_lossy(&out.stderr));
+
+    let wasm_path = scratch.join("pmap.wasm");
+    let run = run_wasm_via_node(&wasm_path);
+    assert!(run.status.success(), "node failed to run the wasm module:\n{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout), "1 4 9 16 25\n");
+}

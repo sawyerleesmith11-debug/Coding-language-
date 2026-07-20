@@ -163,6 +163,33 @@ Evaluates each argument and joins them with a single space, then emits
 one line. It's a statement, not an expression — `print(...)` cannot be
 used inside another expression.
 
+## `parallel_map`
+
+```
+let out = parallel_map(f, arr);
+```
+
+A reserved builtin call name, not a keyword — `f` and `arr` aren't
+special syntax, this is an ordinary function call whose name the
+compiler recognizes. `f` must be a bare function name (not a call, not
+an expression) naming a `pure fn` that takes exactly one scalar
+parameter; `arr` is any array expression. Applies `f` to every element
+of `arr`, producing a new array of the same length: `out[i] == f(arr[i])`
+for every `i`. Misusing it — `f` not pure, wrong parameter count, `f`'s
+parameter is an array, an unknown function, or a non-identifier first
+argument — is a compile error in every backend, checked unconditionally
+(not just inside `pure fn` bodies).
+
+Purity is what makes this safe to run in any order, or concurrently:
+a `pure fn` can't observe or be affected by any other call to itself,
+so there's nothing for two calls to race over. `run`/`runFast` (single-
+threaded JS) and the WASM backend apply `f` sequentially; `kestrelc`'s
+native backend is the only one that actually parallelizes it across
+real OS threads (above a size threshold — see `kestrelc/README.md`). See
+`kestrel-DESIGN.md` idea #5 for the full design rationale and current
+scope (`arr` must currently be a fixed-size array literal, not a
+parameter).
+
 ## Operators (highest to lowest precedence)
 
 | Precedence | Operators           | Associativity |

@@ -42,7 +42,12 @@ from plain JS with no dependencies.
 Same as `kestrelc`'s native WASM backend (`kestrelc --wasm`) — see
 `../kestrelc/README.md`, including array support (literals, parameters,
 indexing, compile-time-proven bounds elision for literal indices into
-literal-length arrays). Array data lives in a small fixed-size (1 MiB),
+literal-length arrays) and `parallel_map(f, arr)` — accepted here too,
+but run **sequentially**: WASM's threads proposal needs
+SharedArrayBuffer plus a Web Worker per thread, well out of scope for
+this zero-dependency build. Real thread-level parallelism is
+`kestrelc`'s native backend only (see `../kestrelc/README.md`'s
+"Parallel map" section). Array data lives in a small fixed-size (1 MiB),
 never-freed bump-allocated arena in the module's linear memory — fine
 for short toy programs, not for anything long-running or
 allocation-heavy. Cranelift and everything it depends on (native-only:
