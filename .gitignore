@@ -1,3 +1,9 @@
 node_modules/
 *.log
 .DS_Store
+
+# Generic "Claude Token Optimizer" boilerplate (from a global tool, not
+# authored for this repo) and personal scratch notes — not project content.
+.claude/
+docs/INDEX.md
+kestrel-roadmap-brainstorm.md
