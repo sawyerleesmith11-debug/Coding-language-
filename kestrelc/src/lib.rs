@@ -54,17 +54,23 @@ pub fn compile_to_wasm_bytes(src: &str) -> Result<Vec<u8>, String> {
 
     let purity_errors = purity::check_purity(&program);
     if !purity_errors.is_empty() {
-        return Err(format!("Purity check failed:\n  {}", purity_errors.join("\n  ")));
+        let msgs: Vec<String> =
+            purity_errors.iter().map(|e| format_diagnostic(src, "<input>", e.line, e.col, 1, &e.message)).collect();
+        return Err(format!("Purity check failed:\n  {}", msgs.join("\n  ")));
     }
 
     let pmap_errors = purity::check_parallel_map(&program);
     if !pmap_errors.is_empty() {
-        return Err(format!("parallel_map() check failed:\n  {}", pmap_errors.join("\n  ")));
+        let msgs: Vec<String> =
+            pmap_errors.iter().map(|e| format_diagnostic(src, "<input>", e.line, e.col, 1, &e.message)).collect();
+        return Err(format!("parallel_map() check failed:\n  {}", msgs.join("\n  ")));
     }
 
     let type_errors = typecheck::check_types(&program);
     if !type_errors.is_empty() {
-        return Err(format!("Type check failed:\n  {}", type_errors.join("\n  ")));
+        let msgs: Vec<String> =
+            type_errors.iter().map(|e| format_diagnostic(src, "<input>", e.line, e.col, 1, &e.message)).collect();
+        return Err(format!("Type check failed:\n  {}", msgs.join("\n  ")));
     }
 
     if !program.iter().any(|f| f.name == "main") {

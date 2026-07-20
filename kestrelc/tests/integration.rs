@@ -83,6 +83,42 @@ fn rejects_purity_violation_kes_at_compile_time() {
         stderr.contains("'oops' is marked pure"),
         "expected the purity error message, got:\n{stderr}"
     );
+    // kestrelc's own purity checker now carries a real source position
+    // (not just kestrel.js's) — a file:line:col header and a caret line,
+    // the same treatment lex/parse errors already got.
+    assert!(
+        stderr.contains("purity_violation.kes:") && stderr.contains('^'),
+        "expected a file:line:col: + caret diagnostic, got:\n{stderr}"
+    );
+}
+
+#[test]
+fn rejects_a_parallel_map_misuse_with_a_caret_pointing_at_the_call_site() {
+    let scratch = scratch_dir("pmap_caret");
+    let src_path = scratch.join("prog.kes");
+    fs::write(
+        &src_path,
+        "fn not_pure(x: i64) -> i64 { print(x); return x; }\n\
+         fn main() {\n\
+         \x20   let a = [1, 2, 3];\n\
+         \x20   let b = parallel_map(not_pure, a);\n\
+         \x20   print(b[0]);\n\
+         }\n",
+    )
+    .unwrap();
+
+    let out = Command::new(kestrelc_bin())
+        .arg(&src_path)
+        .current_dir(&scratch)
+        .output()
+        .expect("failed to run kestrelc");
+    assert!(!out.status.success(), "kestrelc should have rejected a non-pure parallel_map callback");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("must be a 'pure fn'"), "expected the parallel_map error message, got:\n{stderr}");
+    assert!(
+        stderr.contains("prog.kes:4:") && stderr.contains('^'),
+        "expected a caret pointing at line 4 (the parallel_map call), got:\n{stderr}"
+    );
 }
 
 #[test]
@@ -1131,6 +1167,10 @@ fn wasm_backend_typecheck_rejects_the_same_ill_typed_program() {
     assert!(!out.status.success(), "kestrelc --wasm should have rejected this program");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("needs two numbers"), "expected the type error, got:\n{stderr}");
+    assert!(
+        stderr.contains("prog.kes:2:") && stderr.contains('^'),
+        "expected a file:line:col: + caret diagnostic, got:\n{stderr}"
+    );
 }
 
 // ==================== runtime call-count profile / inlining ====================

@@ -39,7 +39,7 @@ impl Kind {
     }
 }
 
-pub fn check_types(program: &Program) -> Vec<String> {
+pub fn check_types(program: &Program) -> Vec<CheckError> {
     let fns: HashMap<&str, &Fn> = program.iter().map(|f| (f.name.as_str(), f)).collect();
     let mut errors = Vec::new();
 
@@ -67,7 +67,20 @@ pub fn check_types(program: &Program) -> Vec<String> {
         }
     }
 
-    fn infer_expr(e: &Expr, locals: &HashMap<String, Kind>, fns: &HashMap<&str, &Fn>, errors: &mut Vec<String>) -> Kind {
+    // `pos` is the enclosing statement's line/col (see ast.rs's
+    // CheckError doc comment) — every error found anywhere inside one
+    // statement's expression tree points at that statement, not the
+    // exact sub-expression.
+    fn infer_expr(
+        e: &Expr,
+        locals: &HashMap<String, Kind>,
+        fns: &HashMap<&str, &Fn>,
+        pos: (usize, usize),
+        errors: &mut Vec<CheckError>,
+    ) -> Kind {
+        let push = |errors: &mut Vec<CheckError>, message: String| {
+            errors.push(CheckError { message, line: pos.0, col: pos.1 });
+        };
         match e {
             Expr::Num(_) => Kind::Int,
             Expr::Bool(_) => Kind::Bool,
@@ -75,61 +88,61 @@ pub fn check_types(program: &Program) -> Vec<String> {
             Expr::Ident(name) => locals.get(name).copied().unwrap_or(Kind::Unknown),
             Expr::ArrayLit(elems) => {
                 for el in elems {
-                    infer_expr(el, locals, fns, errors);
+                    infer_expr(el, locals, fns, pos, errors);
                 }
                 Kind::Array
             }
             Expr::Index { target, index } => {
-                infer_expr(target, locals, fns, errors);
-                let idx_kind = infer_expr(index, locals, fns, errors);
+                infer_expr(target, locals, fns, pos, errors);
+                let idx_kind = infer_expr(index, locals, fns, pos, errors);
                 if idx_kind != Kind::Unknown && idx_kind != Kind::Int {
-                    errors.push(format!("array index must be a number, found {}", idx_kind.name()));
+                    push(errors, format!("array index must be a number, found {}", idx_kind.name()));
                 }
                 Kind::Int // Kestrel arrays are integer-valued so far
             }
             Expr::Unary { op, expr } => {
-                let k = infer_expr(expr, locals, fns, errors);
+                let k = infer_expr(expr, locals, fns, pos, errors);
                 match op {
                     UnOp::Neg => {
                         if k != Kind::Unknown && k != Kind::Int {
-                            errors.push(format!("'-' needs a number, found {}", k.name()));
+                            push(errors, format!("'-' needs a number, found {}", k.name()));
                         }
                         Kind::Int
                     }
                     UnOp::Not => {
                         if k != Kind::Unknown && k != Kind::Bool {
-                            errors.push(format!("'!' needs a boolean, found {}", k.name()));
+                            push(errors, format!("'!' needs a boolean, found {}", k.name()));
                         }
                         Kind::Bool
                     }
                 }
             }
             Expr::Binop { op, left, right } => {
-                let l = infer_expr(left, locals, fns, errors);
-                let r = infer_expr(right, locals, fns, errors);
+                let l = infer_expr(left, locals, fns, pos, errors);
+                let r = infer_expr(right, locals, fns, pos, errors);
                 let sym = op_symbol(*op);
                 match op {
                     BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
                         if !is_numeric(l) || !is_numeric(r) {
-                            errors.push(format!("'{sym}' needs two numbers, found {} and {}", l.name(), r.name()));
+                            push(errors, format!("'{sym}' needs two numbers, found {} and {}", l.name(), r.name()));
                         }
                         Kind::Int
                     }
                     BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => {
                         if !is_numeric(l) || !is_numeric(r) {
-                            errors.push(format!("'{sym}' needs two numbers, found {} and {}", l.name(), r.name()));
+                            push(errors, format!("'{sym}' needs two numbers, found {} and {}", l.name(), r.name()));
                         }
                         Kind::Bool
                     }
                     BinOp::And | BinOp::Or => {
                         if !is_boolean(l) || !is_boolean(r) {
-                            errors.push(format!("'{sym}' needs two booleans, found {} and {}", l.name(), r.name()));
+                            push(errors, format!("'{sym}' needs two booleans, found {} and {}", l.name(), r.name()));
                         }
                         Kind::Bool
                     }
                     BinOp::Eq | BinOp::Neq => {
                         if l != Kind::Unknown && r != Kind::Unknown && l != r {
-                            errors.push(format!("'{sym}' compares mismatched types: {} and {}", l.name(), r.name()));
+                            push(errors, format!("'{sym}' compares mismatched types: {} and {}", l.name(), r.name()));
                         }
                         Kind::Bool
                     }
@@ -139,13 +152,13 @@ pub fn check_types(program: &Program) -> Vec<String> {
                 if name == "parallel_map" {
                     // Already validated by check_parallel_map; just infer the array arg.
                     if args.len() == 2 {
-                        infer_expr(&args[1], locals, fns, errors);
+                        infer_expr(&args[1], locals, fns, pos, errors);
                     }
                     return Kind::Array;
                 }
                 if let Some(callee) = fns.get(name.as_str()) {
                     if callee.params.len() != args.len() {
-                        errors.push(format!(
+                        push(errors, format!(
                             "'{name}' expects {} argument{}, got {}",
                             callee.params.len(),
                             if callee.params.len() == 1 { "" } else { "s" },
@@ -154,35 +167,43 @@ pub fn check_types(program: &Program) -> Vec<String> {
                     }
                 }
                 for a in args {
-                    infer_expr(a, locals, fns, errors);
+                    infer_expr(a, locals, fns, pos, errors);
                 }
                 Kind::Unknown // return kind isn't tracked yet
             }
         }
     }
 
-    fn visit_stmt(s: &Stmt, locals: &mut HashMap<String, Kind>, fns: &HashMap<&str, &Fn>, errors: &mut Vec<String>) {
+    fn visit_stmt(s: &Stmt, locals: &mut HashMap<String, Kind>, fns: &HashMap<&str, &Fn>, errors: &mut Vec<CheckError>) {
         match s {
-            Stmt::Let { name, value } => {
-                let k = infer_expr(value, locals, fns, errors);
+            Stmt::Let { name, value, line, col } => {
+                let k = infer_expr(value, locals, fns, (*line, *col), errors);
                 locals.entry(name.clone()).or_insert(k);
             }
-            Stmt::Assign { name, value } => {
-                let k = infer_expr(value, locals, fns, errors);
+            Stmt::Assign { name, value, line, col } => {
+                let k = infer_expr(value, locals, fns, (*line, *col), errors);
                 if let Some(&prior) = locals.get(name) {
                     if prior != Kind::Unknown && k != Kind::Unknown && prior != k {
-                        errors.push(format!(
-                            "'{name}' was first bound as {}, can't assign {} to it",
-                            prior.name(),
-                            k.name()
-                        ));
+                        errors.push(CheckError {
+                            message: format!(
+                                "'{name}' was first bound as {}, can't assign {} to it",
+                                prior.name(),
+                                k.name()
+                            ),
+                            line: *line,
+                            col: *col,
+                        });
                     }
                 }
             }
-            Stmt::If { cond, then_block, else_block } => {
-                let k = infer_expr(cond, locals, fns, errors);
+            Stmt::If { cond, then_block, else_block, line, col } => {
+                let k = infer_expr(cond, locals, fns, (*line, *col), errors);
                 if k != Kind::Unknown && k != Kind::Bool {
-                    errors.push(format!("if-condition must be a boolean expression, found {}", k.name()));
+                    errors.push(CheckError {
+                        message: format!("if-condition must be a boolean expression, found {}", k.name()),
+                        line: *line,
+                        col: *col,
+                    });
                 }
                 for st in then_block {
                     visit_stmt(st, locals, fns, errors);
@@ -193,27 +214,31 @@ pub fn check_types(program: &Program) -> Vec<String> {
                     }
                 }
             }
-            Stmt::While { cond, body } => {
-                let k = infer_expr(cond, locals, fns, errors);
+            Stmt::While { cond, body, line, col } => {
+                let k = infer_expr(cond, locals, fns, (*line, *col), errors);
                 if k != Kind::Unknown && k != Kind::Bool {
-                    errors.push(format!("while-condition must be a boolean expression, found {}", k.name()));
+                    errors.push(CheckError {
+                        message: format!("while-condition must be a boolean expression, found {}", k.name()),
+                        line: *line,
+                        col: *col,
+                    });
                 }
                 for st in body {
                     visit_stmt(st, locals, fns, errors);
                 }
             }
-            Stmt::Print { args } => {
+            Stmt::Print { args, line, col } => {
                 for a in args {
-                    infer_expr(a, locals, fns, errors);
+                    infer_expr(a, locals, fns, (*line, *col), errors);
                 }
             }
-            Stmt::Return { value } => {
+            Stmt::Return { value, line, col } => {
                 if let Some(v) = value {
-                    infer_expr(v, locals, fns, errors);
+                    infer_expr(v, locals, fns, (*line, *col), errors);
                 }
             }
-            Stmt::ExprStmt { expr } => {
-                infer_expr(expr, locals, fns, errors);
+            Stmt::ExprStmt { expr, line, col } => {
+                infer_expr(expr, locals, fns, (*line, *col), errors);
             }
         }
     }
@@ -225,7 +250,7 @@ pub fn check_types(program: &Program) -> Vec<String> {
             visit_stmt(s, &mut locals, &fns, &mut fn_errors);
         }
         for e in fn_errors {
-            errors.push(format!("in '{}': {e}", fn_.name));
+            errors.push(CheckError { message: format!("in '{}': {}", fn_.name, e.message), line: e.line, col: e.col });
         }
     }
     errors

@@ -390,10 +390,20 @@ position is still statement-granularity, not full per-expression — `let
 x = f(a) + g(b);` points the caret at the start of the `let`, not at
 whichever of `f(a)`/`g(b)` was actually the problem, since that needs a
 span on every expression node, not just statements, which is still
-real future work. `kestrelc` (native, via Cranelift) doesn't have any
-of this — its own `purity.rs`/`typecheck.rs` still report
-message-only errors; runtime errors (unknown identifier,
-out-of-bounds index, etc.) in every backend are also still
+real future work.
+
+`kestrelc`'s own `purity.rs`/`typecheck.rs` now report the same kind of
+positioned diagnostic, not just the JS backends: every `Stmt` in
+`kestrelc/src/ast.rs` carries the line/col of its first token (set by
+the parser), `check_purity`/`check_parallel_map`/`check_types` return
+`CheckError { message, line, col }` instead of a bare `String`, and
+`main.rs` / `lib.rs`'s `compile_to_wasm_bytes` render each one through
+the same `format_diagnostic` helper lex/parse errors already used — so
+`kestrelc` (native CLI, `--wasm`, and `kestrelc-web`) all get the real
+`file:line:col:` + caret treatment for purity, `parallel_map` misuse,
+and type errors too, at the same statement granularity as the JS
+backends. Runtime errors (unknown identifier, out-of-bounds index,
+etc.) and codegen-internal errors in every backend are still
 message-only, since they're not part of the AST-walking checkers this
 change touched.
 
@@ -465,11 +475,13 @@ backend's codegen actually accepts. `kestrelc` does not memoize yet —
 see below.
 
 Not yet implemented (future work, roughly in priority order):
-1. Full per-expression position tracking — purity/type errors now get a
-   real `file:line:col:` + caret (see above), but pinned to the
-   *statement*, not the exact sub-expression; going finer needs a span
-   on every AST node, not just statements. Also: bringing any of this
-   to `kestrelc`'s own checkers, and to runtime errors in every backend.
+1. Full per-expression position tracking — purity/type errors, in both
+   the JS backends *and* `kestrelc`'s own checkers now (see above), get
+   a real `file:line:col:` + caret, but pinned to the *statement*, not
+   the exact sub-expression; going finer needs a span on every AST
+   node, not just statements. Still open: runtime errors (unknown
+   identifier, out-of-bounds index, etc.) and codegen-internal errors
+   in every backend are still message-only.
 2. Bringing memoization (shipped in the JS backends, see above) to
    `kestrelc` — `parallel_map`-chain fusion is now in both. Also:
    generalizing fusion beyond the current narrow adjacent-`let` shape.

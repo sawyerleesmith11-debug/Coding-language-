@@ -289,13 +289,14 @@ impl Parser {
     }
 
     fn parse_stmt(&mut self) -> PResult<Stmt> {
+        let (line, col) = (self.peek().line, self.peek().col);
         if self.at(&Tok::Let) {
             self.advance();
             let name = self.expect_ident()?;
             self.expect(Tok::Eq)?;
             let value = self.parse_expr()?;
             self.expect(Tok::Semi)?;
-            return Ok(Stmt::Let { name, value });
+            return Ok(Stmt::Let { name, value, line, col });
         }
         if self.at(&Tok::If) {
             self.advance();
@@ -309,7 +310,7 @@ impl Parser {
             } else {
                 None
             };
-            return Ok(Stmt::If { cond, then_block, else_block });
+            return Ok(Stmt::If { cond, then_block, else_block, line, col });
         }
         if self.at(&Tok::While) {
             self.advance();
@@ -317,7 +318,7 @@ impl Parser {
             let cond = self.parse_expr()?;
             self.expect(Tok::RParen)?;
             let body = self.parse_block()?;
-            return Ok(Stmt::While { cond, body });
+            return Ok(Stmt::While { cond, body, line, col });
         }
         if self.at(&Tok::Print) {
             self.advance();
@@ -325,13 +326,13 @@ impl Parser {
             let args = self.parse_args()?;
             self.expect(Tok::RParen)?;
             self.expect(Tok::Semi)?;
-            return Ok(Stmt::Print { args });
+            return Ok(Stmt::Print { args, line, col });
         }
         if self.at(&Tok::Return) {
             self.advance();
             let value = if self.at(&Tok::Semi) { None } else { Some(self.parse_expr()?) };
             self.expect(Tok::Semi)?;
-            return Ok(Stmt::Return { value });
+            return Ok(Stmt::Return { value, line, col });
         }
         if let Tok::Ident(name) = &self.peek().tok {
             let name = name.clone();
@@ -340,16 +341,17 @@ impl Parser {
                 self.advance();
                 let value = self.parse_expr()?;
                 self.expect(Tok::Semi)?;
-                return Ok(Stmt::Assign { name, value });
+                return Ok(Stmt::Assign { name, value, line, col });
             }
         }
         let expr = self.parse_expr()?;
         self.expect(Tok::Semi)?;
-        Ok(Stmt::ExprStmt { expr })
+        Ok(Stmt::ExprStmt { expr, line, col })
     }
 
     fn parse_fn_decl(&mut self) -> PResult<Fn> {
         let line = self.peek().line;
+        let col = self.peek().col;
         let pure = if self.at(&Tok::Pure) {
             self.advance();
             true
@@ -374,7 +376,7 @@ impl Parser {
             None
         };
         let body = self.parse_block()?;
-        Ok(Fn { name, pure, params, return_type, where_clause, body, line })
+        Ok(Fn { name, pure, params, return_type, where_clause, body, line, col })
     }
 }
 

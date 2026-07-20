@@ -1,10 +1,12 @@
 // Direct port of kestrel.js's checkPurity() — same rules, same
-// recursion-safe traversal, same error wording.
+// recursion-safe traversal, same error wording. Returns CheckError
+// (message + source position) rather than a bare String — see
+// ast.rs's CheckError doc comment for the statement-granularity scope.
 
 use crate::ast::*;
 use std::collections::{HashMap, HashSet};
 
-pub fn check_purity(program: &Program) -> Vec<String> {
+pub fn check_purity(program: &Program) -> Vec<CheckError> {
     let fns: HashMap<&str, &Fn> = program.iter().map(|f| (f.name.as_str(), f)).collect();
     let mut impure_cache: HashMap<String, bool> = HashMap::new();
 
@@ -81,18 +83,18 @@ pub fn check_purity(program: &Program) -> Vec<String> {
                 return;
             }
             match s {
-                Stmt::Let { name, value } => {
+                Stmt::Let { name, value, .. } => {
                     locals.insert(name.clone());
                     visit_expr(value, fns, cache, stack, impure);
                 }
-                Stmt::Assign { name, value } => {
+                Stmt::Assign { name, value, .. } => {
                     if !locals.contains(name) {
                         *impure = true; // mutating something outside itself
                         return;
                     }
                     visit_expr(value, fns, cache, stack, impure);
                 }
-                Stmt::If { cond, then_block, else_block } => {
+                Stmt::If { cond, then_block, else_block, .. } => {
                     visit_expr(cond, fns, cache, stack, impure);
                     for st in then_block {
                         visit_stmt(st, fns, cache, stack, locals, impure);
@@ -103,7 +105,7 @@ pub fn check_purity(program: &Program) -> Vec<String> {
                         }
                     }
                 }
-                Stmt::While { cond, body } => {
+                Stmt::While { cond, body, .. } => {
                     visit_expr(cond, fns, cache, stack, impure);
                     for st in body {
                         visit_stmt(st, fns, cache, stack, locals, impure);
@@ -112,12 +114,12 @@ pub fn check_purity(program: &Program) -> Vec<String> {
                 Stmt::Print { .. } => {
                     *impure = true; // I/O
                 }
-                Stmt::Return { value } => {
+                Stmt::Return { value, .. } => {
                     if let Some(v) = value {
                         visit_expr(v, fns, cache, stack, impure);
                     }
                 }
-                Stmt::ExprStmt { expr } => visit_expr(expr, fns, cache, stack, impure),
+                Stmt::ExprStmt { expr, .. } => visit_expr(expr, fns, cache, stack, impure),
             }
         }
 
@@ -135,10 +137,14 @@ pub fn check_purity(program: &Program) -> Vec<String> {
         if fn_.pure {
             let mut stack = HashSet::new();
             if is_impure(fn_, &fns, &mut impure_cache, &mut stack) {
-                errors.push(format!(
-                    "'{}' is marked pure but calls print or an impure function",
-                    fn_.name
-                ));
+                errors.push(CheckError {
+                    message: format!(
+                        "'{}' is marked pure but calls print or an impure function",
+                        fn_.name
+                    ),
+                    line: fn_.line,
+                    col: fn_.col,
+                });
             }
         }
     }
@@ -154,15 +160,21 @@ pub fn check_purity(program: &Program) -> Vec<String> {
 /// bodies, unlike `check_purity`) since misusing it is a bug regardless
 /// of the caller's own purity. Direct port of kestrel.js's
 /// `checkParallelMap` — same rules, same wording.
-pub fn check_parallel_map(program: &Program) -> Vec<String> {
+pub fn check_parallel_map(program: &Program) -> Vec<CheckError> {
     let fns: HashMap<&str, &Fn> = program.iter().map(|f| (f.name.as_str(), f)).collect();
     let mut errors = Vec::new();
 
-    fn visit_expr(e: &Expr, fns: &HashMap<&str, &Fn>, errors: &mut Vec<String>) {
+    // `pos` is the *enclosing statement's* line/col, not the exact
+    // parallel_map(...) call's own position — see ast.rs's CheckError
+    // doc comment on the statement-granularity scope this is limited to.
+    fn visit_expr(e: &Expr, fns: &HashMap<&str, &Fn>, pos: (usize, usize), errors: &mut Vec<CheckError>) {
+        let push = |errors: &mut Vec<CheckError>, message: String| {
+            errors.push(CheckError { message, line: pos.0, col: pos.1 });
+        };
         match e {
             Expr::Call { name, args } if name == "parallel_map" => {
                 if args.len() != 2 {
-                    errors.push(format!(
+                    push(errors, format!(
                         "parallel_map() takes exactly 2 arguments (a pure function and an array), got {}",
                         args.len()
                     ));
@@ -170,53 +182,55 @@ pub fn check_parallel_map(program: &Program) -> Vec<String> {
                 }
                 match &args[0] {
                     Expr::Ident(func_name) => match fns.get(func_name.as_str()) {
-                        None => errors.push(format!("parallel_map(): unknown function '{func_name}'")),
-                        Some(callee) if !callee.pure => errors.push(format!(
+                        None => push(errors, format!("parallel_map(): unknown function '{func_name}'")),
+                        Some(callee) if !callee.pure => push(errors, format!(
                             "parallel_map(): '{func_name}' must be a 'pure fn' — parallel safety comes entirely from the purity proof"
                         )),
-                        Some(callee) if callee.params.len() != 1 => errors.push(format!(
+                        Some(callee) if callee.params.len() != 1 => push(errors, format!(
                             "parallel_map(): '{func_name}' must take exactly one parameter (one array element in, one result out), has {}",
                             callee.params.len()
                         )),
-                        Some(callee) if !matches!(callee.params[0].ty, Type::Named(_)) => errors.push(format!(
+                        Some(callee) if !matches!(callee.params[0].ty, Type::Named(_)) => push(errors, format!(
                             "parallel_map(): '{func_name}'s parameter must be a scalar (one array element), not an array"
                         )),
                         Some(_) => {}
                     },
-                    _ => errors.push(
+                    _ => push(errors,
                         "parallel_map()'s first argument must be a bare function name, not an expression".to_string(),
                     ),
                 }
-                visit_expr(&args[1], fns, errors);
+                visit_expr(&args[1], fns, pos, errors);
             }
             Expr::Call { args, .. } => {
                 for a in args {
-                    visit_expr(a, fns, errors);
+                    visit_expr(a, fns, pos, errors);
                 }
             }
             Expr::Binop { left, right, .. } => {
-                visit_expr(left, fns, errors);
-                visit_expr(right, fns, errors);
+                visit_expr(left, fns, pos, errors);
+                visit_expr(right, fns, pos, errors);
             }
-            Expr::Unary { expr, .. } => visit_expr(expr, fns, errors),
+            Expr::Unary { expr, .. } => visit_expr(expr, fns, pos, errors),
             Expr::Index { target, index } => {
-                visit_expr(target, fns, errors);
-                visit_expr(index, fns, errors);
+                visit_expr(target, fns, pos, errors);
+                visit_expr(index, fns, pos, errors);
             }
             Expr::ArrayLit(elems) => {
                 for el in elems {
-                    visit_expr(el, fns, errors);
+                    visit_expr(el, fns, pos, errors);
                 }
             }
             _ => {}
         }
     }
 
-    fn visit_stmt(s: &Stmt, fns: &HashMap<&str, &Fn>, errors: &mut Vec<String>) {
+    fn visit_stmt(s: &Stmt, fns: &HashMap<&str, &Fn>, errors: &mut Vec<CheckError>) {
         match s {
-            Stmt::Let { value, .. } | Stmt::Assign { value, .. } => visit_expr(value, fns, errors),
-            Stmt::If { cond, then_block, else_block } => {
-                visit_expr(cond, fns, errors);
+            Stmt::Let { value, line, col, .. } | Stmt::Assign { value, line, col, .. } => {
+                visit_expr(value, fns, (*line, *col), errors)
+            }
+            Stmt::If { cond, then_block, else_block, line, col } => {
+                visit_expr(cond, fns, (*line, *col), errors);
                 for st in then_block {
                     visit_stmt(st, fns, errors);
                 }
@@ -226,23 +240,23 @@ pub fn check_parallel_map(program: &Program) -> Vec<String> {
                     }
                 }
             }
-            Stmt::While { cond, body } => {
-                visit_expr(cond, fns, errors);
+            Stmt::While { cond, body, line, col } => {
+                visit_expr(cond, fns, (*line, *col), errors);
                 for st in body {
                     visit_stmt(st, fns, errors);
                 }
             }
-            Stmt::Print { args } => {
+            Stmt::Print { args, line, col } => {
                 for a in args {
-                    visit_expr(a, fns, errors);
+                    visit_expr(a, fns, (*line, *col), errors);
                 }
             }
-            Stmt::Return { value } => {
+            Stmt::Return { value, line, col } => {
                 if let Some(v) = value {
-                    visit_expr(v, fns, errors);
+                    visit_expr(v, fns, (*line, *col), errors);
                 }
             }
-            Stmt::ExprStmt { expr } => visit_expr(expr, fns, errors),
+            Stmt::ExprStmt { expr, line, col } => visit_expr(expr, fns, (*line, *col), errors),
         }
     }
 

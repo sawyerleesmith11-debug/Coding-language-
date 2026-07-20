@@ -71,8 +71,8 @@ is not a drop-in `cc` and hasn't been tested.
 
 ## Error diagnostics
 
-Lex and parse errors — the two stages that track a source position —
-are reported as `file:line:col: message`, followed by the offending
+Lex, parse, purity-check, `parallel_map()`-misuse, and type-check errors
+are all reported as `file:line:col: message`, followed by the offending
 source line and a `^` span underneath it, e.g.:
 
 ```
@@ -83,12 +83,17 @@ kestrelc: fib.kes:3:12: Unexpected token 'RParen'
 
 `format_diagnostic` (`src/lib.rs`) is the single formatter behind this,
 shared by the CLI (`main.rs`) and `compile_to_wasm_bytes` (and so
-`kestrelc-web`/`kestrel-editor.html`'s "native (wasm)" engine). Honest
-scope: purity check, type check, and codegen errors don't carry a
-source position yet — only the lexer and parser attach one to a token,
-so those are the only stages this can point at. See
-`kestrel-DESIGN.md`'s roadmap for the (real, separate) work needed to
-extend this to the rest of the compiler.
+`kestrelc-web`/`kestrel-editor.html`'s "native (wasm)" engine). Every
+`Stmt` in `src/ast.rs` carries the line/col of its first token (set by
+the parser); `purity::check_purity`, `purity::check_parallel_map`, and
+`typecheck::check_types` return `CheckError { message, line, col }`
+values pinned to the statement they were found in, instead of bare
+strings. Honest scope: statement granularity, not full per-expression —
+`let x = f(a) + g(b);` points at the start of the `let`, not at
+whichever of `f(a)`/`g(b)` was actually the problem — and codegen
+errors (and every backend's runtime errors — unknown identifier,
+out-of-bounds index, etc.) still don't carry a source position at all.
+See `kestrel-DESIGN.md`'s roadmap for what's left.
 
 ## Compile cache
 
