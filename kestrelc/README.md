@@ -51,6 +51,23 @@ system `cc` as the linker. Requires a working C toolchain (`cc`) on
 `PATH` — nothing else; Cranelift itself is a pure-Rust dependency with
 no system requirements beyond that.
 
+**Windows works too**, as of a real cross-platform pass — three
+platform-specific bugs are fixed, not worked around: `kestrelc_runtime.c`
+used `sysconf(_SC_NPROCESSORS_ONLN)` for processor-count detection, a
+POSIX/glibc extension MinGW-w64's UCRT doesn't implement (now falls back
+to `GetSystemInfo` under `#ifdef _WIN32`); every generated function
+signature (Kestrel functions, `printf`, the `parallel_map` runtime shim)
+was hardcoded to `CallConv::SystemV` instead of asking the target ISA
+for its actual native convention (Windows x64 uses a different one —
+this silently passed arguments in the wrong registers); and Cranelift's
+`enable_probestack` defaults to *off*, which is a guaranteed
+`STATUS_ACCESS_VIOLATION` crash the moment a stack-allocated array
+literal (see "Scope" below) crosses one 4KB page, since Windows relies
+on each stack page being touched in order to grow the stack — now
+enabled with the `inline` strategy. On Windows, `cc` needs to resolve to
+a real GCC (e.g. via a MinGW-w64 toolchain on `PATH`) — MSVC's `cl.exe`
+is not a drop-in `cc` and hasn't been tested.
+
 ## Error diagnostics
 
 Lex and parse errors — the two stages that track a source position —
