@@ -5,18 +5,19 @@
 
 use crate::ast::*;
 use crate::error::{ErrorKind, KestrelcError};
+use crate::interner::Symbol;
 use crate::span::Span;
 use std::collections::{HashMap, HashSet};
 
 pub fn check_purity(program: &Program) -> Vec<KestrelcError> {
-    let fns: HashMap<&str, &Fn> = program.iter().map(|f| (f.name.as_str(), f)).collect();
-    let mut impure_cache: HashMap<String, bool> = HashMap::new();
+    let fns: HashMap<Symbol, &Fn> = program.iter().map(|f| (f.name, f)).collect();
+    let mut impure_cache: HashMap<Symbol, bool> = HashMap::new();
 
     fn is_impure<'a>(
         fn_: &'a Fn,
-        fns: &HashMap<&'a str, &'a Fn>,
-        cache: &mut HashMap<String, bool>,
-        stack: &mut HashSet<String>,
+        fns: &HashMap<Symbol, &'a Fn>,
+        cache: &mut HashMap<Symbol, bool>,
+        stack: &mut HashSet<Symbol>,
     ) -> bool {
         if let Some(v) = cache.get(&fn_.name) {
             return *v;
@@ -24,16 +25,16 @@ pub fn check_purity(program: &Program) -> Vec<KestrelcError> {
         if stack.contains(&fn_.name) {
             return false; // recursion: assume ok, don't loop forever
         }
-        stack.insert(fn_.name.clone());
+        stack.insert(fn_.name);
 
         let mut impure = false;
-        let mut locals: HashSet<String> = fn_.params.iter().map(|p| p.name.clone()).collect();
+        let mut locals: HashSet<Symbol> = fn_.params.iter().map(|p| p.name).collect();
 
         fn visit_expr<'a>(
             e: &Expr,
-            fns: &HashMap<&'a str, &'a Fn>,
-            cache: &mut HashMap<String, bool>,
-            stack: &mut HashSet<String>,
+            fns: &HashMap<Symbol, &'a Fn>,
+            cache: &mut HashMap<Symbol, bool>,
+            stack: &mut HashSet<Symbol>,
             impure: &mut bool,
         ) {
             if *impure {
@@ -41,7 +42,7 @@ pub fn check_purity(program: &Program) -> Vec<KestrelcError> {
             }
             match e {
                 Expr::Call { name, args } => {
-                    if let Some(callee) = fns.get(name.as_str()) {
+                    if let Some(callee) = fns.get(name) {
                         if !callee.pure {
                             *impure = true;
                             return;
@@ -75,10 +76,10 @@ pub fn check_purity(program: &Program) -> Vec<KestrelcError> {
 
         fn visit_stmt<'a>(
             s: &Stmt,
-            fns: &HashMap<&'a str, &'a Fn>,
-            cache: &mut HashMap<String, bool>,
-            stack: &mut HashSet<String>,
-            locals: &mut HashSet<String>,
+            fns: &HashMap<Symbol, &'a Fn>,
+            cache: &mut HashMap<Symbol, bool>,
+            stack: &mut HashSet<Symbol>,
+            locals: &mut HashSet<Symbol>,
             impure: &mut bool,
         ) {
             if *impure {
@@ -86,7 +87,7 @@ pub fn check_purity(program: &Program) -> Vec<KestrelcError> {
             }
             match s {
                 Stmt::Let { name, value, .. } => {
-                    locals.insert(name.clone());
+                    locals.insert(*name);
                     visit_expr(value, fns, cache, stack, impure);
                 }
                 Stmt::Assign { name, value, .. } => {
@@ -129,7 +130,7 @@ pub fn check_purity(program: &Program) -> Vec<KestrelcError> {
             visit_stmt(s, fns, cache, stack, &mut locals, &mut impure);
         }
 
-        cache.insert(fn_.name.clone(), impure);
+        cache.insert(fn_.name, impure);
         stack.remove(&fn_.name);
         impure
     }
@@ -163,18 +164,18 @@ pub fn check_purity(program: &Program) -> Vec<KestrelcError> {
 /// of the caller's own purity. Direct port of kestrel.js's
 /// `checkParallelMap` — same rules, same wording.
 pub fn check_parallel_map(program: &Program) -> Vec<KestrelcError> {
-    let fns: HashMap<&str, &Fn> = program.iter().map(|f| (f.name.as_str(), f)).collect();
+    let fns: HashMap<Symbol, &Fn> = program.iter().map(|f| (f.name, f)).collect();
     let mut errors = Vec::new();
 
     // `span` is the *enclosing statement's* span, not the exact
     // parallel_map(...) call's own position — see error.rs's doc
     // comment on the statement-granularity scope this is limited to.
-    fn visit_expr(e: &Expr, fns: &HashMap<&str, &Fn>, span: Span, errors: &mut Vec<KestrelcError>) {
+    fn visit_expr(e: &Expr, fns: &HashMap<Symbol, &Fn>, span: Span, errors: &mut Vec<KestrelcError>) {
         let push = |errors: &mut Vec<KestrelcError>, message: String| {
             errors.push(KestrelcError::new(ErrorKind::ParallelMap, message, span));
         };
         match e {
-            Expr::Call { name, args } if name == "parallel_map" => {
+            Expr::Call { name, args } if &*name.resolve() == "parallel_map" => {
                 if args.len() != 2 {
                     push(errors, format!(
                         "parallel_map() takes exactly 2 arguments (a pure function and an array), got {}",
@@ -183,7 +184,7 @@ pub fn check_parallel_map(program: &Program) -> Vec<KestrelcError> {
                     return;
                 }
                 match &args[0] {
-                    Expr::Ident(func_name) => match fns.get(func_name.as_str()) {
+                    Expr::Ident(func_name) => match fns.get(func_name) {
                         None => push(errors, format!("parallel_map(): unknown function '{func_name}'")),
                         Some(callee) if !callee.pure => push(errors, format!(
                             "parallel_map(): '{func_name}' must be a 'pure fn' — parallel safety comes entirely from the purity proof"
@@ -226,7 +227,7 @@ pub fn check_parallel_map(program: &Program) -> Vec<KestrelcError> {
         }
     }
 
-    fn visit_stmt(s: &Stmt, fns: &HashMap<&str, &Fn>, errors: &mut Vec<KestrelcError>) {
+    fn visit_stmt(s: &Stmt, fns: &HashMap<Symbol, &Fn>, errors: &mut Vec<KestrelcError>) {
         match s {
             Stmt::Let { value, span, .. } | Stmt::Assign { value, span, .. } => {
                 visit_expr(value, fns, *span, errors)

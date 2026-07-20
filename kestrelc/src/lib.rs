@@ -1,6 +1,7 @@
 pub mod ast;
 pub mod error;
 pub mod fusion;
+pub mod interner;
 pub mod lexer;
 pub mod parser;
 pub mod purity;
@@ -81,7 +82,7 @@ pub fn compile_to_wasm_bytes(src: &str) -> Result<Vec<u8>, String> {
         return Err(format!("Type check failed:\n  {}", msgs.join("\n  ")));
     }
 
-    if !program.iter().any(|f| f.name == "main") {
+    if !program.iter().any(|f| &*f.name.resolve() == "main") {
         return Err("No 'main' function found".to_string());
     }
 

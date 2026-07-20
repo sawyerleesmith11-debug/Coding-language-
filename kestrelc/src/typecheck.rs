@@ -17,6 +17,7 @@
 
 use crate::ast::*;
 use crate::error::{ErrorKind, KestrelcError};
+use crate::interner::Symbol;
 use crate::span::Span;
 use std::collections::HashMap;
 
@@ -42,7 +43,7 @@ impl Kind {
 }
 
 pub fn check_types(program: &Program) -> Vec<KestrelcError> {
-    let fns: HashMap<&str, &Fn> = program.iter().map(|f| (f.name.as_str(), f)).collect();
+    let fns: HashMap<Symbol, &Fn> = program.iter().map(|f| (f.name, f)).collect();
     let mut errors = Vec::new();
 
     fn is_numeric(k: Kind) -> bool {
@@ -75,8 +76,8 @@ pub fn check_types(program: &Program) -> Vec<KestrelcError> {
     // sub-expression.
     fn infer_expr(
         e: &Expr,
-        locals: &HashMap<String, Kind>,
-        fns: &HashMap<&str, &Fn>,
+        locals: &HashMap<Symbol, Kind>,
+        fns: &HashMap<Symbol, &Fn>,
         span: Span,
         errors: &mut Vec<KestrelcError>,
     ) -> Kind {
@@ -151,14 +152,14 @@ pub fn check_types(program: &Program) -> Vec<KestrelcError> {
                 }
             }
             Expr::Call { name, args } => {
-                if name == "parallel_map" {
+                if &*name.resolve() == "parallel_map" {
                     // Already validated by check_parallel_map; just infer the array arg.
                     if args.len() == 2 {
                         infer_expr(&args[1], locals, fns, span, errors);
                     }
                     return Kind::Array;
                 }
-                if let Some(callee) = fns.get(name.as_str()) {
+                if let Some(callee) = fns.get(name) {
                     if callee.params.len() != args.len() {
                         push(errors, format!(
                             "'{name}' expects {} argument{}, got {}",
@@ -176,11 +177,11 @@ pub fn check_types(program: &Program) -> Vec<KestrelcError> {
         }
     }
 
-    fn visit_stmt(s: &Stmt, locals: &mut HashMap<String, Kind>, fns: &HashMap<&str, &Fn>, errors: &mut Vec<KestrelcError>) {
+    fn visit_stmt(s: &Stmt, locals: &mut HashMap<Symbol, Kind>, fns: &HashMap<Symbol, &Fn>, errors: &mut Vec<KestrelcError>) {
         match s {
             Stmt::Let { name, value, span } => {
                 let k = infer_expr(value, locals, fns, *span, errors);
-                locals.entry(name.clone()).or_insert(k);
+                locals.entry(*name).or_insert(k);
             }
             Stmt::Assign { name, value, span } => {
                 let k = infer_expr(value, locals, fns, *span, errors);
@@ -246,7 +247,7 @@ pub fn check_types(program: &Program) -> Vec<KestrelcError> {
     }
 
     for fn_ in program {
-        let mut locals: HashMap<String, Kind> = HashMap::new();
+        let mut locals: HashMap<Symbol, Kind> = HashMap::new();
         let mut fn_errors = Vec::new();
         for s in &fn_.body {
             visit_stmt(s, &mut locals, &fns, &mut fn_errors);

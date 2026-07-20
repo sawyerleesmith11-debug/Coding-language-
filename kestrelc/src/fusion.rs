@@ -19,6 +19,7 @@
 // top-level statements.
 
 use crate::ast::*;
+use crate::interner::{self, Symbol};
 use crate::span::Span;
 use std::collections::HashMap;
 
@@ -27,18 +28,18 @@ use std::collections::HashMap;
 /// that explicit rather than borrowing an unrelated position.
 const SYNTHESIZED: Span = Span { line: 0, col: 0, len: 0 };
 
-fn count_ident_refs(stmts: &[Stmt], name: &str) -> usize {
+fn count_ident_refs(stmts: &[Stmt], name: Symbol) -> usize {
     let mut count = 0;
     count_ident_refs_stmts(stmts, name, &mut count);
     count
 }
 
-fn count_ident_refs_stmts(stmts: &[Stmt], name: &str, count: &mut usize) {
+fn count_ident_refs_stmts(stmts: &[Stmt], name: Symbol, count: &mut usize) {
     for s in stmts {
         match s {
             Stmt::Let { value, .. } => count_ident_refs_expr(value, name, count),
             Stmt::Assign { name: n, value, .. } => {
-                if n == name {
+                if *n == name {
                     *count += 1;
                 }
                 count_ident_refs_expr(value, name, count);
@@ -69,10 +70,10 @@ fn count_ident_refs_stmts(stmts: &[Stmt], name: &str, count: &mut usize) {
     }
 }
 
-fn count_ident_refs_expr(e: &Expr, name: &str, count: &mut usize) {
+fn count_ident_refs_expr(e: &Expr, name: Symbol, count: &mut usize) {
     match e {
         Expr::Ident(n) => {
-            if n == name {
+            if *n == name {
                 *count += 1;
             }
         }
@@ -101,11 +102,11 @@ fn count_ident_refs_expr(e: &Expr, name: &str, count: &mut usize) {
 
 /// If `e` is `parallel_map(<bare ident>, <anything>)`, returns
 /// (callee name, array-arg expression).
-fn as_parallel_map_call(e: &Expr) -> Option<(&str, &Expr)> {
+fn as_parallel_map_call(e: &Expr) -> Option<(Symbol, &Expr)> {
     if let Expr::Call { name, args } = e {
-        if name == "parallel_map" && args.len() == 2 {
+        if &*name.resolve() == "parallel_map" && args.len() == 2 {
             if let Expr::Ident(f) = &args[0] {
-                return Some((f.as_str(), &args[1]));
+                return Some((*f, &args[1]));
             }
         }
     }
@@ -114,10 +115,10 @@ fn as_parallel_map_call(e: &Expr) -> Option<(&str, &Expr)> {
 
 /// A match at statement index `i`: the two adjacent `let`s can fuse.
 struct Match {
-    a_name: String,
-    b_name: String,
-    f_name: String,
-    g_name: String,
+    a_name: Symbol,
+    b_name: Symbol,
+    f_name: Symbol,
+    g_name: Symbol,
     arr_arg: Expr,
 }
 
@@ -133,18 +134,12 @@ fn match_fusion(body: &[Stmt], i: usize) -> Option<Match> {
     if a2 != a_name {
         return None;
     }
-    Some(Match {
-        a_name: a_name.clone(),
-        b_name: b_name.clone(),
-        f_name: f_name.to_string(),
-        g_name: g_name.to_string(),
-        arr_arg: arr_arg.clone(),
-    })
+    Some(Match { a_name: *a_name, b_name: *b_name, f_name, g_name, arr_arg: arr_arg.clone() })
 }
 
 fn fuse_body(
     body: &mut Vec<Stmt>,
-    fns: &mut HashMap<String, Fn>,
+    fns: &mut HashMap<Symbol, Fn>,
     extra_fns: &mut Vec<Fn>,
     counter: &mut usize,
 ) {
@@ -158,7 +153,7 @@ fn fuse_body(
         // second let's own parallel_map call (that's the "1" this
         // counts) — anything more means `a` escapes this fusion and
         // must stay materialized.
-        if count_ident_refs(body, &m.a_name) != 1 {
+        if count_ident_refs(body, m.a_name) != 1 {
             i += 1;
             continue;
         }
@@ -171,21 +166,19 @@ fn fuse_body(
             continue;
         }
 
-        let fused_name = format!("__fused_{}_{}_{}", *counter, m.f_name, m.g_name);
+        let fused_name = interner::intern(&format!("__fused_{}_{}_{}", *counter, m.f_name, m.g_name));
         *counter += 1;
+        let x_sym = interner::intern("__x");
         let fused_fn = Fn {
-            name: fused_name.clone(),
+            name: fused_name,
             pure: true,
-            params: vec![Param { name: "__x".to_string(), ty: f_fn.params[0].ty.clone() }],
+            params: vec![Param { name: x_sym, ty: f_fn.params[0].ty.clone() }],
             return_type: g_fn.return_type.clone(),
             where_clause: None,
             body: vec![Stmt::Return {
                 value: Some(Expr::Call {
-                    name: m.g_name.clone(),
-                    args: vec![Expr::Call {
-                        name: m.f_name.clone(),
-                        args: vec![Expr::Ident("__x".to_string())],
-                    }],
+                    name: m.g_name,
+                    args: vec![Expr::Call { name: m.f_name, args: vec![Expr::Ident(x_sym)] }],
                 }),
                 span: SYNTHESIZED,
             }],
@@ -195,7 +188,7 @@ fn fuse_body(
         // parallel_map (whose callee is now *this* fused function, not
         // an original source function) resolves when this same slot is
         // re-checked below.
-        fns.insert(fused_name.clone(), fused_fn.clone());
+        fns.insert(fused_name, fused_fn.clone());
         extra_fns.push(fused_fn);
 
         // kestrelc's codegen requires a parallel_map array argument to
@@ -206,16 +199,16 @@ fn fuse_body(
         // reintroduce a `let` binding for it instead of inlining it.
         let mut replacement: Vec<Stmt> = Vec::new();
         let array_ident = match &m.arr_arg {
-            Expr::Ident(name) => Expr::Ident(name.clone()),
+            Expr::Ident(name) => Expr::Ident(*name),
             _ => {
-                replacement.push(Stmt::Let { name: m.a_name.clone(), value: m.arr_arg, span: SYNTHESIZED });
-                Expr::Ident(m.a_name.clone())
+                replacement.push(Stmt::Let { name: m.a_name, value: m.arr_arg, span: SYNTHESIZED });
+                Expr::Ident(m.a_name)
             }
         };
         replacement.push(Stmt::Let {
             name: m.b_name,
             value: Expr::Call {
-                name: "parallel_map".to_string(),
+                name: interner::intern("parallel_map"),
                 args: vec![Expr::Ident(fused_name), array_ident],
             },
             span: SYNTHESIZED,
@@ -240,7 +233,7 @@ fn fuse_body(
 }
 
 pub fn fuse_loops(program: &Program) -> Program {
-    let mut fns: HashMap<String, Fn> = program.iter().map(|f| (f.name.clone(), f.clone())).collect();
+    let mut fns: HashMap<Symbol, Fn> = program.iter().map(|f| (f.name, f.clone())).collect();
     let mut extra_fns: Vec<Fn> = Vec::new();
     let mut counter: usize = 0;
 
@@ -277,7 +270,7 @@ mod tests {
         );
         let fused = fuse_loops(&program);
         assert_eq!(fused.len(), 4, "should have added exactly one fused function");
-        assert!(fused.iter().any(|f| f.name.starts_with("__fused_")));
+        assert!(fused.iter().any(|f| f.name.resolve().starts_with("__fused_")));
     }
 
     #[test]

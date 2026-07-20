@@ -4,6 +4,7 @@
 // compile for the wasm32 target kestrelc-web builds).
 
 use crate::ast::*;
+use crate::interner::Symbol;
 
 // A recognized `where i < N` clause: `i` names a scalar parameter, `N`
 // matches the symbolic size of some `[T; N]` parameter. `idx_pos`/
@@ -14,8 +15,8 @@ use crate::ast::*;
 // shape isn't recognized at all — no elision, no error, just the plain
 // runtime check on every access, same as before this feature existed.
 pub struct WhereInfo {
-    pub idx_param: String,
-    pub arr_param: String,
+    pub idx_param: Symbol,
+    pub arr_param: Symbol,
     pub idx_pos: usize,
     pub arr_pos: usize,
 }

@@ -20,6 +20,7 @@
 
 use crate::ast::*;
 use crate::error::{ErrorKind, KestrelcError};
+use crate::interner::Symbol;
 use crate::span::Span;
 use crate::where_info::{extract_where_info, WhereInfo};
 use std::collections::HashMap;
@@ -67,8 +68,8 @@ pub fn compile_to_wasm(program: &Program) -> Result<Vec<u8>, KestrelcError> {
     // of source order — same two-pass structure as the native backend.
     // An array-typed parameter expands to two i32 params (pointer, then
     // length), matching the native backend's two AbiParams per array.
-    let mut fn_indices: HashMap<String, u32> = HashMap::new();
-    let mut where_infos: HashMap<String, WhereInfo> = HashMap::new();
+    let mut fn_indices: HashMap<Symbol, u32> = HashMap::new();
+    let mut where_infos: HashMap<Symbol, WhereInfo> = HashMap::new();
     for (i, f) in program.iter().enumerate() {
         let mut params = Vec::with_capacity(f.params.len());
         for p in &f.params {
@@ -83,12 +84,12 @@ pub fn compile_to_wasm(program: &Program) -> Result<Vec<u8>, KestrelcError> {
         types.ty().function(params, [ValType::I64]);
         let type_idx = NUM_IMPORTS + i as u32;
         functions.function(type_idx);
-        fn_indices.insert(f.name.clone(), NUM_IMPORTS + i as u32);
-        if f.name == "main" {
+        fn_indices.insert(f.name, NUM_IMPORTS + i as u32);
+        if &*f.name.resolve() == "main" {
             exports.export("main", ExportKind::Func, NUM_IMPORTS + i as u32);
         }
         if let Some(info) = extract_where_info(f) {
-            where_infos.insert(f.name.clone(), info);
+            where_infos.insert(f.name, info);
         }
     }
 
@@ -167,10 +168,10 @@ enum VarLoc {
 // compile-time-known length, so parallel_map over one isn't supported
 // yet (rejected with a clear error at codegen time, once `resolve_array`
 // runs — see `gen_binding`'s parallel_map arm).
-fn slot_kind_for_let(value: &Expr, known_lens: &HashMap<String, u32>) -> SlotKind {
+fn slot_kind_for_let(value: &Expr, known_lens: &HashMap<Symbol, u32>) -> SlotKind {
     match value {
         Expr::ArrayLit(elems) => SlotKind::Array { literal_len: Some(elems.len() as u32) },
-        Expr::Call { name, args } if name == "parallel_map" && args.len() == 2 => {
+        Expr::Call { name, args } if &*name.resolve() == "parallel_map" && args.len() == 2 => {
             let len = match &args[1] {
                 Expr::Ident(arr_name) => known_lens.get(arr_name).copied(),
                 _ => None,
@@ -188,27 +189,27 @@ fn slot_kind_for_param(ty: &Type) -> SlotKind {
     }
 }
 
-fn add_slot(name: &str, kind: SlotKind, slots: &mut Vec<(String, SlotKind)>, seen: &mut HashMap<String, ()>) {
-    if !seen.contains_key(name) {
-        seen.insert(name.to_string(), ());
-        slots.push((name.to_string(), kind));
+fn add_slot(name: Symbol, kind: SlotKind, slots: &mut Vec<(Symbol, SlotKind)>, seen: &mut HashMap<Symbol, ()>) {
+    if !seen.contains_key(&name) {
+        seen.insert(name, ());
+        slots.push((name, kind));
     }
 }
 
 fn walk_slots(
     stmts: &[Stmt],
-    slots: &mut Vec<(String, SlotKind)>,
-    seen: &mut HashMap<String, ()>,
-    known_lens: &mut HashMap<String, u32>,
+    slots: &mut Vec<(Symbol, SlotKind)>,
+    seen: &mut HashMap<Symbol, ()>,
+    known_lens: &mut HashMap<Symbol, u32>,
 ) {
     for s in stmts {
         match s {
             Stmt::Let { name, value, .. } => {
                 let kind = slot_kind_for_let(value, known_lens);
                 if let SlotKind::Array { literal_len: Some(l) } = kind {
-                    known_lens.insert(name.clone(), l);
+                    known_lens.insert(*name, l);
                 }
-                add_slot(name, kind, slots, seen);
+                add_slot(*name, kind, slots, seen);
             }
             Stmt::If { then_block, else_block, .. } => {
                 walk_slots(then_block, slots, seen, known_lens);
@@ -222,12 +223,12 @@ fn walk_slots(
     }
 }
 
-fn collect_slots(f: &Fn) -> Vec<(String, SlotKind)> {
-    let mut slots: Vec<(String, SlotKind)> = Vec::new();
-    let mut seen: HashMap<String, ()> = HashMap::new();
-    let mut known_lens: HashMap<String, u32> = HashMap::new();
+fn collect_slots(f: &Fn) -> Vec<(Symbol, SlotKind)> {
+    let mut slots: Vec<(Symbol, SlotKind)> = Vec::new();
+    let mut seen: HashMap<Symbol, ()> = HashMap::new();
+    let mut known_lens: HashMap<Symbol, u32> = HashMap::new();
     for p in &f.params {
-        add_slot(&p.name, slot_kind_for_param(&p.ty), &mut slots, &mut seen);
+        add_slot(p.name, slot_kind_for_param(&p.ty), &mut slots, &mut seen);
     }
     walk_slots(&f.body, &mut slots, &mut seen, &mut known_lens);
     slots
@@ -235,8 +236,8 @@ fn collect_slots(f: &Fn) -> Vec<(String, SlotKind)> {
 
 fn gen_fn(
     f: &Fn,
-    fn_indices: &HashMap<String, u32>,
-    where_info: &HashMap<String, WhereInfo>,
+    fn_indices: &HashMap<Symbol, u32>,
+    where_info: &HashMap<Symbol, WhereInfo>,
     my_where: Option<&WhereInfo>,
     data_bytes: &mut Vec<u8>,
     str_offsets: &mut HashMap<String, (u32, u32)>,
@@ -246,13 +247,13 @@ fn gen_fn(
     // Assign WASM local indices: params first (their count/types must
     // match the function's declared signature exactly), then every other
     // slot as an additional declared local.
-    let mut vars: HashMap<String, VarLoc> = HashMap::new();
+    let mut vars: HashMap<Symbol, VarLoc> = HashMap::new();
     let mut next_local: u32 = 0;
     let mut extra_locals: Vec<(u32, ValType)> = Vec::new();
-    let param_names: std::collections::HashSet<&str> = f.params.iter().map(|p| p.name.as_str()).collect();
+    let param_names: std::collections::HashSet<Symbol> = f.params.iter().map(|p| p.name).collect();
 
     for (name, kind) in &slot_kinds {
-        let is_param = param_names.contains(name.as_str());
+        let is_param = param_names.contains(name);
         match kind {
             SlotKind::Scalar => {
                 let idx = next_local;
@@ -260,7 +261,7 @@ fn gen_fn(
                 if !is_param {
                     extra_locals.push((1, ValType::I64));
                 }
-                vars.insert(name.clone(), VarLoc::Scalar(idx));
+                vars.insert(*name, VarLoc::Scalar(idx));
             }
             SlotKind::Array { literal_len } => {
                 let ptr = next_local;
@@ -269,7 +270,7 @@ fn gen_fn(
                 if !is_param {
                     extra_locals.push((2, ValType::I32));
                 }
-                vars.insert(name.clone(), VarLoc::Array { ptr, len, literal_len: *literal_len });
+                vars.insert(*name, VarLoc::Array { ptr, len, literal_len: *literal_len });
             }
         }
     }
@@ -301,15 +302,15 @@ fn gen_fn(
 
 struct FnWasm<'a> {
     func: &'a mut Function,
-    vars: HashMap<String, VarLoc>,
-    fn_indices: &'a HashMap<String, u32>,
+    vars: HashMap<Symbol, VarLoc>,
+    fn_indices: &'a HashMap<Symbol, u32>,
     // `where_info` covers every function with a recognized `where idx <
     // N` clause, used to validate the precondition at each *call site*.
     // `my_where` is this specific function's own entry (if any), used to
     // elide the redundant runtime check on the one access inside its own
     // body that the precondition already covers — see codegen.rs's
     // identical native-backend logic for the full rationale.
-    where_info: &'a HashMap<String, WhereInfo>,
+    where_info: &'a HashMap<Symbol, WhereInfo>,
     my_where: Option<&'a WhereInfo>,
     data_bytes: &'a mut Vec<u8>,
     str_offsets: &'a mut HashMap<String, (u32, u32)>,
@@ -338,8 +339,8 @@ impl<'a> FnWasm<'a> {
     /// Shared by `let` and `=`: binds `name` to `value`, handling both
     /// the scalar case and the array-literal case (bump-allocate, one
     /// store per element, then set the ptr/len locals).
-    fn gen_binding(&mut self, name: &str, value: &Expr) -> WResult<()> {
-        match (&self.vars[name], value) {
+    fn gen_binding(&mut self, name: Symbol, value: &Expr) -> WResult<()> {
+        match (&self.vars[&name], value) {
             (VarLoc::Scalar(idx), _) => {
                 let idx = *idx;
                 self.gen_expr(value)?;
@@ -372,10 +373,10 @@ impl<'a> FnWasm<'a> {
                 self.func.instructions().local_set(len);
                 Ok(())
             }
-            (VarLoc::Array { ptr, len, literal_len }, Expr::Call { name: call_name, args }) if call_name == "parallel_map" => {
+            (VarLoc::Array { ptr, len, literal_len }, Expr::Call { name: call_name, args }) if &*call_name.resolve() == "parallel_map" => {
                 let (ptr, len) = (*ptr, *len);
                 let func_name = match &args[0] {
-                    Expr::Ident(n) => n.clone(),
+                    Expr::Ident(n) => *n,
                     _ => return Err(self.err(
                         "parallel_map()'s first argument must be a bare function name".into(),
                     )),
@@ -469,12 +470,12 @@ impl<'a> FnWasm<'a> {
             | Stmt::ExprStmt { span, .. } => *span,
         };
         match s {
-            Stmt::Let { name, value, .. } => self.gen_binding(name, value),
+            Stmt::Let { name, value, .. } => self.gen_binding(*name, value),
             Stmt::Assign { name, value, .. } => {
                 if !self.vars.contains_key(name) {
                     return Err(self.err(format!("Assignment to unknown variable '{name}'")));
                 }
-                self.gen_binding(name, value)
+                self.gen_binding(*name, value)
             }
             Stmt::If { cond, then_block, else_block, .. } => {
                 self.gen_expr(cond)?;
@@ -544,7 +545,7 @@ impl<'a> FnWasm<'a> {
             let is_last = if i == args.len() - 1 { 1 } else { 0 };
             match arg {
                 Expr::Str(s) => {
-                    let (offset, len) = self.intern_str(s);
+                    let (offset, len) = self.intern_str(&s.resolve());
                     self.func.instructions().i32_const(offset as i32).i32_const(len as i32).i32_const(is_last);
                     self.func.instructions().call(IMPORT_PRINT_STR);
                 }

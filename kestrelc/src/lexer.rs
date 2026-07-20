@@ -2,13 +2,14 @@
 // See docs/SYNTAX.md for the grammar this implements.
 
 use crate::error::{ErrorKind, KestrelcError};
+use crate::interner::{self, Symbol};
 use crate::span::Span;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Tok {
     Number(i64),
-    Str(String),
-    Ident(String),
+    Str(Symbol),
+    Ident(Symbol),
     Fn,
     Pure,
     Let,
@@ -49,7 +50,7 @@ pub enum Tok {
     Eof,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct Token {
     pub tok: Tok,
     pub span: Span,
@@ -121,7 +122,7 @@ pub fn lex(src: &str) -> Result<Vec<Token>, KestrelcError> {
                 "return" => Tok::Return,
                 "true" => Tok::True,
                 "false" => Tok::False,
-                _ => Tok::Ident(word),
+                _ => Tok::Ident(interner::intern(&word)),
             };
             tokens.push(Token { tok, span: Span::new(start_line, start_col, i - start) });
             continue;
@@ -137,7 +138,7 @@ pub fn lex(src: &str) -> Result<Vec<Token>, KestrelcError> {
             let s: String = chars[str_start..i].iter().collect();
             i += 1; // closing quote
             col += 1;
-            tokens.push(Token { tok: Tok::Str(s), span: Span::new(start_line, start_col, i - start) });
+            tokens.push(Token { tok: Tok::Str(interner::intern(&s)), span: Span::new(start_line, start_col, i - start) });
             continue;
         }
 
@@ -232,5 +233,14 @@ mod tests {
         assert_eq!(err.span.line, 1);
         assert_eq!(err.span.col, 11); // the '$'
         assert_eq!(err.span.len, 1);
+    }
+
+    #[test]
+    fn identical_identifiers_intern_to_the_same_symbol() {
+        let tokens = lex("let x = x + x;").unwrap();
+        let idents: Vec<Symbol> =
+            tokens.iter().filter_map(|t| if let Tok::Ident(s) = t.tok { Some(s) } else { None }).collect();
+        assert_eq!(idents.len(), 3);
+        assert!(idents.iter().all(|&s| s == idents[0]), "every 'x' should intern to the same Symbol");
     }
 }

@@ -4,31 +4,32 @@
 // kestrelc/README.md) so unsupported programs fail with a clear error
 // instead of silently miscompiling.
 
+use crate::interner::Symbol;
 use crate::span::Span;
 
 #[derive(Debug, Clone)]
 pub enum Type {
-    Named(String),
-    Array { elem: Box<Type>, size: String },
+    Named(Symbol),
+    Array { elem: Box<Type>, size: Symbol },
 }
 
 #[derive(Debug, Clone)]
 pub struct Param {
-    pub name: String,
+    pub name: Symbol,
     pub ty: Type,
 }
 
 #[derive(Debug, Clone)]
 pub enum Expr {
     Num(i64),
-    Str(String),
+    Str(Symbol),
     Bool(bool),
-    Ident(String),
+    Ident(Symbol),
     ArrayLit(Vec<Expr>),
     Unary { op: UnOp, expr: Box<Expr> },
     Binop { op: BinOp, left: Box<Expr>, right: Box<Expr> },
     Index { target: Box<Expr>, index: Box<Expr> },
-    Call { name: String, args: Vec<Expr> },
+    Call { name: Symbol, args: Vec<Expr> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -62,8 +63,8 @@ pub enum BinOp {
 // kestrel.js's own checkPurity/checkTypes already report at.
 #[derive(Debug, Clone)]
 pub enum Stmt {
-    Let { name: String, value: Expr, span: Span },
-    Assign { name: String, value: Expr, span: Span },
+    Let { name: Symbol, value: Expr, span: Span },
+    Assign { name: Symbol, value: Expr, span: Span },
     If { cond: Expr, then_block: Vec<Stmt>, else_block: Option<Vec<Stmt>>, span: Span },
     While { cond: Expr, body: Vec<Stmt>, span: Span },
     Print { args: Vec<Expr>, span: Span },
@@ -73,7 +74,7 @@ pub enum Stmt {
 
 #[derive(Debug, Clone)]
 pub struct Fn {
-    pub name: String,
+    pub name: Symbol,
     pub pure: bool,
     pub params: Vec<Param>,
     pub return_type: Option<Type>,

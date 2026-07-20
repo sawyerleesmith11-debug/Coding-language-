@@ -3,6 +3,7 @@
 
 use crate::ast::*;
 use crate::error::{ErrorKind, KestrelcError};
+use crate::interner::Symbol;
 use crate::lexer::{Tok, Token};
 
 pub struct Parser {
@@ -45,7 +46,7 @@ impl Parser {
         }
     }
 
-    fn expect_ident(&mut self) -> PResult<String> {
+    fn expect_ident(&mut self) -> PResult<Symbol> {
         match &self.peek().tok {
             Tok::Ident(s) => {
                 let s = s.clone();

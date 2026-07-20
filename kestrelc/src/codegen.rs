@@ -7,6 +7,7 @@
 
 use crate::ast::*;
 use crate::error::{ErrorKind, KestrelcError};
+use crate::interner::Symbol;
 use crate::span::Span;
 use crate::where_info::{extract_where_info, WhereInfo};
 use cranelift_codegen::ir::{
@@ -39,7 +40,7 @@ struct ProfileState {
     path_data: DataId,
     path_len: usize,
     record_id: FuncId,
-    counters: HashMap<String, DataId>,
+    counters: HashMap<Symbol, DataId>,
     entries: Vec<(DataId, usize, DataId)>, // (name_data, name_len, counter_data), in declaration order
 }
 
@@ -58,7 +59,7 @@ struct ProfileState {
 struct MemoState {
     lookup_id: FuncId,
     store_id: FuncId,
-    slots: HashMap<String, i32>,
+    slots: HashMap<Symbol, i32>,
 }
 
 /// Mirrors `KESTRELC_MEMO_MAX_ARGS` in kestrelc_runtime.c.
@@ -70,7 +71,7 @@ const MEMO_MAX_SLOTS: usize = 64;
 
 pub struct Codegen {
     module: ObjectModule,
-    fn_ids: HashMap<String, FuncId>,
+    fn_ids: HashMap<Symbol, FuncId>,
     printf_id: FuncId,
     pmap_id: FuncId,
     bounds_fail_id: FuncId,
@@ -78,7 +79,7 @@ pub struct Codegen {
     memo: MemoState,
     str_cache: HashMap<String, StrConst>,
     str_counter: usize,
-    where_info: HashMap<String, WhereInfo>,
+    where_info: HashMap<Symbol, WhereInfo>,
     // The host's real C calling convention (System V on Linux/macOS,
     // Windows x64 on Windows — different register assignments for the
     // same argument list). Every signature below — Kestrel functions,
@@ -276,24 +277,25 @@ impl Codegen {
         // of source order.
         for f in program {
             if f.pure
-                && f.name != "main"
+                && &*f.name.resolve() != "main"
                 && !pmap_callbacks.contains(&f.name)
                 && !f.params.is_empty()
                 && f.params.len() <= MEMO_MAX_ARGS
                 && f.params.iter().all(|p| matches!(p.ty, Type::Named(_)))
                 && (next_memo_slot as usize) < MEMO_MAX_SLOTS
             {
-                self.memo.slots.insert(f.name.clone(), next_memo_slot);
+                self.memo.slots.insert(f.name, next_memo_slot);
                 next_memo_slot += 1;
             }
             let sig = Self::fn_signature(f, self.call_conv);
+            let fn_name_text = f.name.resolve();
             let id = self
                 .module
-                .declare_function(&f.name, Linkage::Export, &sig)
+                .declare_function(&fn_name_text, Linkage::Export, &sig)
                 .map_err(|e| KestrelcError::internal(ErrorKind::Codegen, e.to_string()))?;
-            self.fn_ids.insert(f.name.clone(), id);
+            self.fn_ids.insert(f.name, id);
             if let Some(info) = extract_where_info(f) {
-                self.where_info.insert(f.name.clone(), info);
+                self.where_info.insert(f.name, info);
             }
             if self.profile.is_some() {
                 let counter_name = format!("__kprofile_counter_{}", f.name);
@@ -307,7 +309,7 @@ impl Codegen {
                     .define_data(counter_data, &counter_desc)
                     .map_err(|e| KestrelcError::internal(ErrorKind::Codegen, e.to_string()))?;
 
-                let name_bytes = f.name.as_bytes().to_vec();
+                let name_bytes = fn_name_text.as_bytes().to_vec();
                 let name_len = name_bytes.len();
                 let name_id_str = format!("__kprofile_name_{}", f.name);
                 let name_data = self
@@ -319,7 +321,7 @@ impl Codegen {
                 self.module.define_data(name_data, &name_desc).map_err(|e| KestrelcError::internal(ErrorKind::Codegen, e.to_string()))?;
 
                 let profile = self.profile.as_mut().expect("checked is_some above");
-                profile.counters.insert(f.name.clone(), counter_data);
+                profile.counters.insert(f.name, counter_data);
                 profile.entries.push((name_data, name_len, counter_data));
             }
         }
@@ -347,7 +349,7 @@ impl Codegen {
             builder.seal_block(entry);
 
             let slot_kinds = collect_slots(f);
-            let mut vars: HashMap<String, Slot> = HashMap::new();
+            let mut vars: HashMap<Symbol, Slot> = HashMap::new();
             let mut next_var: u32 = 0;
             for (name, kind) in &slot_kinds {
                 match kind {
@@ -462,8 +464,9 @@ impl Codegen {
             // FnCodegen::gen_stmt's Return arm) — mutually exclusive
             // triggers (memoization eligibility excludes `main`), so
             // there's no case where both would need to run.
+            let is_main = &*f.name.resolve() == "main";
             let epilogue: Option<(Block, Variable)> =
-                if (f.name == "main" && self.profile.is_some()) || my_memo_slot.is_some() {
+                if (is_main && self.profile.is_some()) || my_memo_slot.is_some() {
                     let epilogue_blk = builder.create_block();
                     let ret_var = Variable::from_u32(next_var);
                     builder.declare_var(ret_var, types::I64);
@@ -496,7 +499,7 @@ impl Codegen {
                 }
                 fc.builder.switch_to_block(epilogue_blk);
                 fc.builder.seal_block(epilogue_blk);
-                if f.name == "main" {
+                if is_main {
                     if let Some(profile) = &self.profile {
                         let local_path = fc.module.declare_data_in_func(profile.path_data, fc.builder.func);
                         let path_ptr = fc.builder.ins().symbol_value(types::I64, local_path);
@@ -587,10 +590,10 @@ enum Slot {
 // compile-time-known length, so parallel_map over one isn't supported
 // yet (rejected with a clear error at codegen time, once `resolve_array`
 // runs — see `gen_binding`'s parallel_map arm).
-fn slot_kind_for_let(value: &Expr, known_lens: &HashMap<String, usize>) -> SlotKind {
+fn slot_kind_for_let(value: &Expr, known_lens: &HashMap<Symbol, usize>) -> SlotKind {
     match value {
         Expr::ArrayLit(elems) => SlotKind::Array { literal_len: Some(elems.len()) },
-        Expr::Call { name, args } if name == "parallel_map" && args.len() == 2 => {
+        Expr::Call { name, args } if &*name.resolve() == "parallel_map" && args.len() == 2 => {
             let len = match &args[1] {
                 Expr::Ident(arr_name) => known_lens.get(arr_name).copied(),
                 _ => None,
@@ -609,31 +612,31 @@ fn slot_kind_for_param(ty: &Type) -> SlotKind {
 }
 
 fn add_slot(
-    name: &str,
+    name: Symbol,
     kind: SlotKind,
-    slots: &mut Vec<(String, SlotKind)>,
-    seen: &mut HashMap<String, ()>,
+    slots: &mut Vec<(Symbol, SlotKind)>,
+    seen: &mut HashMap<Symbol, ()>,
 ) {
-    if !seen.contains_key(name) {
-        seen.insert(name.to_string(), ());
-        slots.push((name.to_string(), kind));
+    if !seen.contains_key(&name) {
+        seen.insert(name, ());
+        slots.push((name, kind));
     }
 }
 
 fn walk_slots(
     stmts: &[Stmt],
-    slots: &mut Vec<(String, SlotKind)>,
-    seen: &mut HashMap<String, ()>,
-    known_lens: &mut HashMap<String, usize>,
+    slots: &mut Vec<(Symbol, SlotKind)>,
+    seen: &mut HashMap<Symbol, ()>,
+    known_lens: &mut HashMap<Symbol, usize>,
 ) {
     for s in stmts {
         match s {
             Stmt::Let { name, value, .. } => {
                 let kind = slot_kind_for_let(value, known_lens);
                 if let SlotKind::Array { literal_len: Some(l) } = kind {
-                    known_lens.insert(name.clone(), l);
+                    known_lens.insert(*name, l);
                 }
-                add_slot(name, kind, slots, seen);
+                add_slot(*name, kind, slots, seen);
             }
             Stmt::If { then_block, else_block, .. } => {
                 walk_slots(then_block, slots, seen, known_lens);
@@ -647,12 +650,12 @@ fn walk_slots(
     }
 }
 
-fn collect_slots(f: &Fn) -> Vec<(String, SlotKind)> {
-    let mut slots: Vec<(String, SlotKind)> = Vec::new();
-    let mut seen: HashMap<String, ()> = HashMap::new();
-    let mut known_lens: HashMap<String, usize> = HashMap::new();
+fn collect_slots(f: &Fn) -> Vec<(Symbol, SlotKind)> {
+    let mut slots: Vec<(Symbol, SlotKind)> = Vec::new();
+    let mut seen: HashMap<Symbol, ()> = HashMap::new();
+    let mut known_lens: HashMap<Symbol, usize> = HashMap::new();
     for p in &f.params {
-        add_slot(&p.name, slot_kind_for_param(&p.ty), &mut slots, &mut seen);
+        add_slot(p.name, slot_kind_for_param(&p.ty), &mut slots, &mut seen);
     }
     walk_slots(&f.body, &mut slots, &mut seen, &mut known_lens);
     slots
@@ -660,15 +663,15 @@ fn collect_slots(f: &Fn) -> Vec<(String, SlotKind)> {
 
 struct FnCodegen<'a> {
     builder: FunctionBuilder<'a>,
-    vars: HashMap<String, Slot>,
-    fn_ids: &'a HashMap<String, FuncId>,
+    vars: HashMap<Symbol, Slot>,
+    fn_ids: &'a HashMap<Symbol, FuncId>,
     printf_id: FuncId,
     pmap_id: FuncId,
     bounds_fail_id: FuncId,
     module: &'a mut ObjectModule,
     str_cache: &'a mut HashMap<String, StrConst>,
     str_counter: &'a mut usize,
-    where_info: &'a HashMap<String, WhereInfo>,
+    where_info: &'a HashMap<Symbol, WhereInfo>,
     /// This function's own `where` pair, if it has one recognized —
     /// lets its body trust the precondition (elide the check on
     /// `arr_param[idx_param]`) since every call site is required to
@@ -718,8 +721,8 @@ impl<'a> FnCodegen<'a> {
     /// Shared by `let` and `=`: binds `name` to `value`, handling both
     /// the scalar case (one Variable) and the array-literal case (stack
     /// allocation + one store per element, then the ptr/len Variables).
-    fn gen_binding(&mut self, name: &str, value: &Expr) -> CgResult<()> {
-        match (&self.vars[name], value) {
+    fn gen_binding(&mut self, name: Symbol, value: &Expr) -> CgResult<()> {
+        match (&self.vars[&name], value) {
             (Slot::Scalar(var), _) => {
                 let var = *var;
                 let v = self.gen_expr(value)?;
@@ -754,10 +757,10 @@ impl<'a> FnCodegen<'a> {
                 self.builder.def_var(len, len_val);
                 Ok(())
             }
-            (Slot::Array { ptr, len, literal_len }, Expr::Call { name: call_name, args }) if call_name == "parallel_map" => {
+            (Slot::Array { ptr, len, literal_len }, Expr::Call { name: call_name, args }) if &*call_name.resolve() == "parallel_map" => {
                 let (ptr, len) = (*ptr, *len);
                 let func_name = match &args[0] {
-                    Expr::Ident(n) => n.clone(),
+                    Expr::Ident(n) => *n,
                     _ => {
                         return Err(self.err(
                             "parallel_map()'s first argument must be a bare function name".into(),
@@ -824,14 +827,14 @@ impl<'a> FnCodegen<'a> {
         };
         match s {
             Stmt::Let { name, value, .. } => {
-                self.gen_binding(name, value)?;
+                self.gen_binding(*name, value)?;
                 Ok(false)
             }
             Stmt::Assign { name, value, .. } => {
                 if !self.vars.contains_key(name) {
                     return Err(self.err(format!("Assignment to unknown variable '{name}'")));
                 }
-                self.gen_binding(name, value)?;
+                self.gen_binding(*name, value)?;
                 Ok(false)
             }
             Stmt::If { cond, then_block, else_block, .. } => {

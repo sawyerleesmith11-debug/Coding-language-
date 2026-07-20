@@ -431,6 +431,33 @@ runtime errors (unknown identifier, out-of-bounds index, etc.) in every
 backend remain message-only, and position is still statement-
 granularity everywhere, not full per-expression.
 
+**String interning, shipped.** Every identifier and string literal in
+`kestrelc` used to be its own heap-allocated `String` — one full
+allocation per *occurrence*, not per distinct name, and (the real
+motivation) a `String` payload (24 bytes) forces every variant sharing
+its enum to pay for the largest one: `lexer::Tok::Eof` (0 bytes of its
+own data) cost the full 32 bytes just for sitting next to
+`Tok::Ident(String)`/`Tok::Str(String)`, since Rust sizes an enum to its
+largest variant plus a discriminant. `kestrelc/src/interner.rs`'s
+`Symbol` — a `Copy`, 4-byte handle backed by a `thread_local!` table —
+replaces `String` everywhere an identifier or string-literal value was
+stored: `Tok::Ident`/`Tok::Str`, `ast::Expr::Ident`/`Expr::Str`/
+`Expr::Call`'s callee name, every `ast::Stmt::Let`/`Assign`'s bound
+name, `ast::Param`'s name, `ast::Type::Named`/`Type::Array`'s size name,
+and `ast::Fn`'s own name. **Measured**, not guessed (`size_of` on the
+real structs): `Tok` dropped from 32 bytes to **16**; `Token`
+(`Tok` + `Span`) from 56 to **40**. A `thread_local!` table (not an
+explicit `&mut Interner` threaded through the lexer, parser, and every
+one of purity.rs/typecheck.rs/codegen.rs/wasm_codegen.rs/fusion.rs/
+inline.rs's public functions) is deliberate: `kestrelc` compiles one
+file per process, single-threaded, and a `parallel_map` program's
+worker threads run compiled *machine code*, never touch the AST or this
+table — so there's only ever one interner "session" alive at a time,
+and a global-but-thread-local table avoids a much larger, riskier
+threading refactor for the same result. Hand-rolled (no `string-interner`/
+`lasso` dependency), same posture as the hand-rolled lexer and
+`format_diagnostic` elsewhere in this project.
+
 **Memoization, shipped (all backends, including native now):** both
 `run` and `runFast` cache a `pure fn`'s result by argument value, scoped
 to a single `run`/`runFast` call — a repeated call with identical

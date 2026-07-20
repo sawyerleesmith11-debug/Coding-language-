@@ -115,6 +115,23 @@ every backend's runtime errors (unknown identifier, out-of-bounds
 index, etc.) still don't carry a source position at all. See
 `kestrel-DESIGN.md`'s roadmap for what's left.
 
+## String interning
+
+Every identifier and string literal is interned (`src/interner.rs`) —
+a `Copy`, 4-byte `Symbol` replaces the `String` that used to sit inside
+`lexer::Tok::Ident`/`Tok::Str`, `ast::Expr::Ident`/`Expr::Str`/
+`Expr::Call`'s name, every `Stmt::Let`/`Assign`'s bound name, and
+`ast::Fn`/`Param`/`Type`'s own names. Real, measured payoff (`size_of`
+on the actual structs): `Tok` dropped from 32 bytes to 16; `Token`
+(`Tok` + `Span`) from 56 to 40 — a `String` payload forces every
+variant sharing its enum to pay for the largest one, so even
+`Tok::Eof`'s zero bytes of real data used to cost the full 32. Backed
+by a `thread_local!` table, not an explicit interner threaded through
+every function signature in the crate — `kestrelc` compiles one file
+per process, single-threaded, and `parallel_map`'s worker threads only
+ever run compiled machine code, never touch the AST, so a global
+table needs no real synchronization to be safe.
+
 ## Compile cache
 
 `kestrelc` caches its output across invocations, keyed by a content hash

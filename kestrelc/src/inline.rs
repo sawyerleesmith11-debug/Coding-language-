@@ -32,6 +32,7 @@
 //     `HOT_CALL_THRESHOLD` times.
 
 use crate::ast::*;
+use crate::interner::Symbol;
 use std::collections::{HashMap, HashSet};
 
 /// How many times a previous run must have actually called a function
@@ -41,17 +42,17 @@ use std::collections::{HashMap, HashSet};
 const HOT_CALL_THRESHOLD: u64 = 5;
 
 struct Candidate {
-    params: Vec<String>,
+    params: Vec<Symbol>,
     body: Expr,
 }
 
-fn expr_calls(e: &Expr, name: &str, found: &mut bool) {
+fn expr_calls(e: &Expr, name: Symbol, found: &mut bool) {
     if *found {
         return;
     }
     match e {
         Expr::Call { name: n, args } => {
-            if n == name {
+            if *n == name {
                 *found = true;
                 return;
             }
@@ -77,7 +78,7 @@ fn expr_calls(e: &Expr, name: &str, found: &mut bool) {
     }
 }
 
-fn calls_name(e: &Expr, name: &str) -> bool {
+fn calls_name(e: &Expr, name: Symbol) -> bool {
     let mut found = false;
     expr_calls(e, name, &mut found);
     found
@@ -120,13 +121,13 @@ fn walk_stmts_exprs<'a>(stmts: &'a [Stmt], on_expr: &mut impl FnMut(&'a Expr)) {
 /// set is exactly the one kind of pure function that's ever called from
 /// a `parallel_map` worker thread — excluding it is what makes
 /// memoization's cache lock-free-safe without ever needing a real lock.
-pub(crate) fn collect_parallel_map_callbacks(program: &Program) -> HashSet<String> {
+pub(crate) fn collect_parallel_map_callbacks(program: &Program) -> HashSet<Symbol> {
     let mut callbacks = HashSet::new();
-    fn note_calls(e: &Expr, callbacks: &mut HashSet<String>) {
+    fn note_calls(e: &Expr, callbacks: &mut HashSet<Symbol>) {
         if let Expr::Call { name, args } = e {
-            if name == "parallel_map" {
+            if &*name.resolve() == "parallel_map" {
                 if let Some(Expr::Ident(cb)) = args.first() {
-                    callbacks.insert(cb.clone());
+                    callbacks.insert(*cb);
                 }
             }
             for a in args {
@@ -150,9 +151,9 @@ fn expression_body(f: &Fn) -> Option<&Expr> {
     }
 }
 
-fn substitute(e: &Expr, subst: &HashMap<&str, &Expr>) -> Expr {
+fn substitute(e: &Expr, subst: &HashMap<Symbol, &Expr>) -> Expr {
     match e {
-        Expr::Ident(n) => subst.get(n.as_str()).map(|v| (*v).clone()).unwrap_or_else(|| e.clone()),
+        Expr::Ident(n) => subst.get(n).map(|v| (*v).clone()).unwrap_or_else(|| e.clone()),
         Expr::Unary { op, expr } => Expr::Unary { op: *op, expr: Box::new(substitute(expr, subst)) },
         Expr::Binop { op, left, right } => Expr::Binop {
             op: *op,
@@ -164,7 +165,7 @@ fn substitute(e: &Expr, subst: &HashMap<&str, &Expr>) -> Expr {
             index: Box::new(substitute(index, subst)),
         },
         Expr::Call { name, args } => Expr::Call {
-            name: name.clone(),
+            name: *name,
             args: args.iter().map(|a| substitute(a, subst)).collect(),
         },
         Expr::ArrayLit(elems) => Expr::ArrayLit(elems.iter().map(|e| substitute(e, subst)).collect()),
@@ -172,18 +173,18 @@ fn substitute(e: &Expr, subst: &HashMap<&str, &Expr>) -> Expr {
     }
 }
 
-fn inline_expr(e: &Expr, candidates: &HashMap<String, Candidate>) -> Expr {
+fn inline_expr(e: &Expr, candidates: &HashMap<Symbol, Candidate>) -> Expr {
     match e {
         Expr::Call { name, args } => {
             let new_args: Vec<Expr> = args.iter().map(|a| inline_expr(a, candidates)).collect();
             if let Some(c) = candidates.get(name) {
                 if c.params.len() == new_args.len() {
-                    let subst: HashMap<&str, &Expr> =
-                        c.params.iter().map(|p| p.as_str()).zip(new_args.iter()).collect();
+                    let subst: HashMap<Symbol, &Expr> =
+                        c.params.iter().copied().zip(new_args.iter()).collect();
                     return substitute(&c.body, &subst);
                 }
             }
-            Expr::Call { name: name.clone(), args: new_args }
+            Expr::Call { name: *name, args: new_args }
         }
         Expr::Unary { op, expr } => Expr::Unary { op: *op, expr: Box::new(inline_expr(expr, candidates)) },
         Expr::Binop { op, left, right } => Expr::Binop {
@@ -200,15 +201,15 @@ fn inline_expr(e: &Expr, candidates: &HashMap<String, Candidate>) -> Expr {
     }
 }
 
-fn inline_stmts(stmts: &[Stmt], candidates: &HashMap<String, Candidate>) -> Vec<Stmt> {
+fn inline_stmts(stmts: &[Stmt], candidates: &HashMap<Symbol, Candidate>) -> Vec<Stmt> {
     stmts
         .iter()
         .map(|s| match s {
             Stmt::Let { name, value, span } => {
-                Stmt::Let { name: name.clone(), value: inline_expr(value, candidates), span: *span }
+                Stmt::Let { name: *name, value: inline_expr(value, candidates), span: *span }
             }
             Stmt::Assign { name, value, span } => {
-                Stmt::Assign { name: name.clone(), value: inline_expr(value, candidates), span: *span }
+                Stmt::Assign { name: *name, value: inline_expr(value, candidates), span: *span }
             }
             Stmt::If { cond, then_block, else_block, span } => Stmt::If {
                 cond: inline_expr(cond, candidates),
@@ -245,21 +246,21 @@ pub fn inline_hot_fns(program: &Program, profile: &HashMap<String, u64>) -> Prog
         return program.clone();
     }
     let pmap_callbacks = collect_parallel_map_callbacks(program);
-    let mut candidates: HashMap<String, Candidate> = HashMap::new();
+    let mut candidates: HashMap<Symbol, Candidate> = HashMap::new();
     for f in program {
-        if !f.pure || f.name == "main" || pmap_callbacks.contains(&f.name) {
+        if !f.pure || &*f.name.resolve() == "main" || pmap_callbacks.contains(&f.name) {
             continue;
         }
-        let Some(count) = profile.get(&f.name) else { continue };
+        let Some(count) = profile.get(&*f.name.resolve()) else { continue };
         if *count < HOT_CALL_THRESHOLD {
             continue;
         }
         let Some(body) = expression_body(f) else { continue };
-        if calls_name(body, &f.name) {
+        if calls_name(body, f.name) {
             continue; // self-recursive — would substitute forever
         }
-        candidates.insert(f.name.clone(), Candidate {
-            params: f.params.iter().map(|p| p.name.clone()).collect(),
+        candidates.insert(f.name, Candidate {
+            params: f.params.iter().map(|p| p.name).collect(),
             body: body.clone(),
         });
     }
@@ -289,10 +290,11 @@ mod tests {
         let mut profile = HashMap::new();
         profile.insert("double".to_string(), 10);
         let out = inline_hot_fns(&program, &profile);
-        let main_fn = out.iter().find(|f| f.name == "main").unwrap();
+        let main_fn = out.iter().find(|f| &*f.name.resolve() == "main").unwrap();
+        let double_sym = crate::interner::intern("double");
         match &main_fn.body[0] {
             Stmt::Let { value, .. } => {
-                assert!(!calls_name(value, "double"), "expected 'double' inlined away, got {value:?}");
+                assert!(!calls_name(value, double_sym), "expected 'double' inlined away, got {value:?}");
             }
             other => panic!("expected a let, got {other:?}"),
         }
@@ -306,9 +308,10 @@ mod tests {
         let mut profile = HashMap::new();
         profile.insert("double".to_string(), 1); // below HOT_CALL_THRESHOLD
         let out = inline_hot_fns(&program, &profile);
-        let main_fn = out.iter().find(|f| f.name == "main").unwrap();
+        let main_fn = out.iter().find(|f| &*f.name.resolve() == "main").unwrap();
+        let double_sym = crate::interner::intern("double");
         match &main_fn.body[0] {
-            Stmt::Let { value, .. } => assert!(calls_name(value, "double")),
+            Stmt::Let { value, .. } => assert!(calls_name(value, double_sym)),
             other => panic!("expected a let, got {other:?}"),
         }
     }
@@ -321,7 +324,9 @@ mod tests {
         let mut profile = HashMap::new();
         profile.insert("triple".to_string(), 50);
         let out = inline_hot_fns(&program, &profile);
-        let main_fn = out.iter().find(|f| f.name == "main").unwrap();
+        let main_fn = out.iter().find(|f| &*f.name.resolve() == "main").unwrap();
+        let triple_sym = crate::interner::intern("triple");
+        let z_sym = crate::interner::intern("z");
         // The direct call `triple(9)` must stay a real call — the
         // function still needs to exist as a real function for
         // parallel_map's function-pointer call to work.
@@ -329,11 +334,11 @@ mod tests {
             .body
             .iter()
             .find_map(|s| match s {
-                Stmt::Let { name, value, .. } if name == "z" => Some(value),
+                Stmt::Let { name, value, .. } if *name == z_sym => Some(value),
                 _ => None,
             })
             .unwrap();
-        assert!(calls_name(last_let, "triple"));
+        assert!(calls_name(last_let, triple_sym));
     }
 
     #[test]
@@ -347,9 +352,10 @@ mod tests {
         let mut profile = HashMap::new();
         profile.insert("weird".to_string(), 50);
         let out = inline_hot_fns(&program, &profile);
-        let main_fn = out.iter().find(|f| f.name == "main").unwrap();
+        let main_fn = out.iter().find(|f| &*f.name.resolve() == "main").unwrap();
+        let weird_sym = crate::interner::intern("weird");
         match &main_fn.body[0] {
-            Stmt::Let { value, .. } => assert!(calls_name(value, "weird")),
+            Stmt::Let { value, .. } => assert!(calls_name(value, weird_sym)),
             other => panic!("expected a let, got {other:?}"),
         }
     }

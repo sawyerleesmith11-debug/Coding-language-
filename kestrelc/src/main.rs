@@ -121,7 +121,7 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    if !program.iter().any(|f| f.name == "main") {
+    if !program.iter().any(|f| &*f.name.resolve() == "main") {
         eprintln!("kestrelc: No 'main' function found");
         return ExitCode::FAILURE;
     }
