@@ -156,7 +156,7 @@ describe("purity checker", () => {
     `));
     const errors = Kestrel.checkPurity(program);
     assert.equal(errors.length, 1);
-    assert.match(errors[0], /'f' is marked pure/);
+    assert.match(errors[0].message, /'f' is marked pure/);
   });
 
   test("rejects a pure fn that calls an impure function", () => {
@@ -527,31 +527,37 @@ describe("checkTypes() — first honest type checker", () => {
   });
 });
 
-describe("purity/type errors carry a line number", () => {
-  test("purity violation reports the line of the offending print", () => {
-    assert.throws(
-      () => Kestrel.run(`
-        pure fn oops() -> i32 {
-          print("hi");
-          return 1;
-        }
-        fn main() { oops(); }
-      `),
-      /is marked pure but calls print or an impure function \(line 3\)/
-    );
+describe("purity/type errors carry a file:line:col: + caret, not just a line", () => {
+  test("purity violation points a caret at the offending print statement", () => {
+    let message = "";
+    try {
+      Kestrel.run(`
+pure fn oops() -> i32 {
+  print("hi");
+  return 1;
+}
+fn main() { oops(); }
+`);
+    } catch (e) { message = e.message; }
+    assert.match(message, /is marked pure but calls print or an impure function/);
+    assert.match(message, /<input>:3:3:/);
+    assert.match(message, /\^+/);
   });
 
-  test("a type error reports the line of the offending statement, not just the function", () => {
-    assert.throws(
-      () => Kestrel.run(`
-        fn main() {
-          let x = 1;
+  test("a type error points a caret at the offending statement, not just the function", () => {
+    let message = "";
+    try {
+      Kestrel.run(`
+fn main() {
+  let x = 1;
 
-          print(5 + true);
-        }
-      `),
-      /needs two numbers, found int and bool \(line 5\)/
-    );
+  print(5 + true);
+}
+`);
+    } catch (e) { message = e.message; }
+    assert.match(message, /needs two numbers, found int and bool/);
+    assert.match(message, /<input>:5:3:/);
+    assert.match(message, /\^+/);
   });
 });
 

@@ -96,7 +96,8 @@ include line, column, and a length too, not just a line number —
 `kestrelc`'s CLI/WASM output and lex/parse errors surfaced through
 `kestrel-editor.html` print `file:line:col: message` with a `^` under
 the offending span. Purity-check and type-check errors (JS backends)
-now carry a location too — a statement line, not a full caret span; see
+get the same `file:line:col:` + caret treatment now too, pinned to the
+statement that triggered them (not the exact sub-expression yet); see
 `kestrel-DESIGN.md` for the exact scope and what's still message-only
 (`kestrelc`'s own checkers, runtime errors everywhere). `pure fn`
 calls are now memoized too, in both JS backends (`run` and `runFast`)

@@ -354,15 +354,19 @@ describe as future work. `kestrelc`'s CLI and `kestrelc-web` (and so
 `kestrel-editor.html`'s "native (wasm)" engine) use it for real; the
 `run`/`runFast` engines in the editor use it too when a `KestrelError`
 reaches the Run button's error handler. Purity-check and type-check
-errors (both JS backends) now carry a location too, though a coarser
-one: every statement's line is recorded at parse time and threaded
-through `checkPurity`/`checkTypes`, so a message like `'-' needs a
-number, found bool (line 5)` points at the offending statement — not a
-`file:line:col:` + caret span down to the exact token, since that would
-need a span on every expression node, not just statements, which is
-still real future work. **Scope, honestly:** `kestrelc` (native, via
-Cranelift) doesn't have any of this — its own `purity.rs`/`typecheck.rs`
-still report message-only errors; runtime errors (unknown identifier,
+errors (both JS backends) now get the full `file:line:col:` + caret
+treatment too, not just lex/parse errors — `checkPurity` and
+`checkTypes` return `{message, line, col, len}` objects (instead of
+plain strings) pinned to the statement that triggered them, and
+`run`/`runFast` render each one through `formatKestrelError` before
+throwing, exactly like a lex/parse error. **Scope, honestly:** the
+position is still statement-granularity, not full per-expression — `let
+x = f(a) + g(b);` points the caret at the start of the `let`, not at
+whichever of `f(a)`/`g(b)` was actually the problem, since that needs a
+span on every expression node, not just statements, which is still
+real future work. `kestrelc` (native, via Cranelift) doesn't have any
+of this — its own `purity.rs`/`typecheck.rs` still report
+message-only errors; runtime errors (unknown identifier,
 out-of-bounds index, etc.) in every backend are also still
 message-only, since they're not part of the AST-walking checkers this
 change touched.
@@ -405,11 +409,11 @@ plain `while`-loop calling multiple pure fns per iteration) is still
 unaddressed.
 
 Not yet implemented (future work, roughly in priority order):
-1. Full per-expression position tracking (statement-level line is now
-   in place for purity/type errors, see above) — a `file:line:col:` +
-   caret for those stages too needs a span on every AST node, not just
-   statements. Also: bringing any of this to `kestrelc`'s own checkers,
-   and to runtime errors in every backend.
+1. Full per-expression position tracking — purity/type errors now get a
+   real `file:line:col:` + caret (see above), but pinned to the
+   *statement*, not the exact sub-expression; going finer needs a span
+   on every AST node, not just statements. Also: bringing any of this
+   to `kestrelc`'s own checkers, and to runtime errors in every backend.
 2. Bringing memoization and `parallel_map`-chain fusion (both shipped
    in the JS backends, see above) to `kestrelc`. Also: generalizing
    fusion beyond the current narrow adjacent-`let` shape.
