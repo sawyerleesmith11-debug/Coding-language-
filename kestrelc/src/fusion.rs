@@ -31,34 +31,34 @@ fn count_ident_refs_stmts(stmts: &[Stmt], name: &str, count: &mut usize) {
     for s in stmts {
         match s {
             Stmt::Let { value, .. } => count_ident_refs_expr(value, name, count),
-            Stmt::Assign { name: n, value } => {
+            Stmt::Assign { name: n, value, .. } => {
                 if n == name {
                     *count += 1;
                 }
                 count_ident_refs_expr(value, name, count);
             }
-            Stmt::If { cond, then_block, else_block } => {
+            Stmt::If { cond, then_block, else_block, .. } => {
                 count_ident_refs_expr(cond, name, count);
                 count_ident_refs_stmts(then_block, name, count);
                 if let Some(eb) = else_block {
                     count_ident_refs_stmts(eb, name, count);
                 }
             }
-            Stmt::While { cond, body } => {
+            Stmt::While { cond, body, .. } => {
                 count_ident_refs_expr(cond, name, count);
                 count_ident_refs_stmts(body, name, count);
             }
-            Stmt::Print { args } => {
+            Stmt::Print { args, .. } => {
                 for a in args {
                     count_ident_refs_expr(a, name, count);
                 }
             }
-            Stmt::Return { value } => {
+            Stmt::Return { value, .. } => {
                 if let Some(v) = value {
                     count_ident_refs_expr(v, name, count);
                 }
             }
-            Stmt::ExprStmt { expr } => count_ident_refs_expr(expr, name, count),
+            Stmt::ExprStmt { expr, .. } => count_ident_refs_expr(expr, name, count),
         }
     }
 }
@@ -116,7 +116,7 @@ struct Match {
 }
 
 fn match_fusion(body: &[Stmt], i: usize) -> Option<Match> {
-    let (Stmt::Let { name: a_name, value: v1 }, Stmt::Let { name: b_name, value: v2 }) =
+    let (Stmt::Let { name: a_name, value: v1, .. }, Stmt::Let { name: b_name, value: v2, .. }) =
         (&body[i], &body[i + 1])
     else {
         return None;
@@ -181,8 +181,13 @@ fn fuse_body(
                         args: vec![Expr::Ident("__x".to_string())],
                     }],
                 }),
+                // Synthesized, not parsed from real source — no
+                // meaningful position to point a diagnostic at.
+                line: 0,
+                col: 0,
             }],
             line: 0,
+            col: 0,
         };
         // Register the synthesized function too, so a third chained
         // parallel_map (whose callee is now *this* fused function, not
@@ -201,7 +206,7 @@ fn fuse_body(
         let array_ident = match &m.arr_arg {
             Expr::Ident(name) => Expr::Ident(name.clone()),
             _ => {
-                replacement.push(Stmt::Let { name: m.a_name.clone(), value: m.arr_arg });
+                replacement.push(Stmt::Let { name: m.a_name.clone(), value: m.arr_arg, line: 0, col: 0 });
                 Expr::Ident(m.a_name.clone())
             }
         };
@@ -211,6 +216,8 @@ fn fuse_body(
                 name: "parallel_map".to_string(),
                 args: vec![Expr::Ident(fused_name), array_ident],
             },
+            line: 0,
+            col: 0,
         });
         body.splice(i..i + 2, replacement);
         // Re-check this same slot: a third chained parallel_map now

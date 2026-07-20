@@ -86,27 +86,27 @@ fn calls_name(e: &Expr, name: &str) -> bool {
 fn walk_stmts_exprs<'a>(stmts: &'a [Stmt], on_expr: &mut impl FnMut(&'a Expr)) {
     for s in stmts {
         match s {
-            Stmt::Let { value, .. } | Stmt::Assign { value, .. } | Stmt::ExprStmt { expr: value } => {
+            Stmt::Let { value, .. } | Stmt::Assign { value, .. } | Stmt::ExprStmt { expr: value, .. } => {
                 on_expr(value)
             }
-            Stmt::If { cond, then_block, else_block } => {
+            Stmt::If { cond, then_block, else_block, .. } => {
                 on_expr(cond);
                 walk_stmts_exprs(then_block, on_expr);
                 if let Some(eb) = else_block {
                     walk_stmts_exprs(eb, on_expr);
                 }
             }
-            Stmt::While { cond, body } => {
+            Stmt::While { cond, body, .. } => {
                 on_expr(cond);
                 walk_stmts_exprs(body, on_expr);
             }
-            Stmt::Print { args } => {
+            Stmt::Print { args, .. } => {
                 for a in args {
                     on_expr(a);
                 }
             }
-            Stmt::Return { value: Some(e) } => on_expr(e),
-            Stmt::Return { value: None } => {}
+            Stmt::Return { value: Some(e), .. } => on_expr(e),
+            Stmt::Return { value: None, .. } => {}
         }
     }
 }
@@ -139,7 +139,7 @@ fn expression_body(f: &Fn) -> Option<&Expr> {
         return None;
     }
     match f.body.as_slice() {
-        [Stmt::Return { value: Some(e) }] => Some(e),
+        [Stmt::Return { value: Some(e), .. }] => Some(e),
         _ => None,
     }
 }
@@ -198,25 +198,34 @@ fn inline_stmts(stmts: &[Stmt], candidates: &HashMap<String, Candidate>) -> Vec<
     stmts
         .iter()
         .map(|s| match s {
-            Stmt::Let { name, value } => Stmt::Let { name: name.clone(), value: inline_expr(value, candidates) },
-            Stmt::Assign { name, value } => {
-                Stmt::Assign { name: name.clone(), value: inline_expr(value, candidates) }
+            Stmt::Let { name, value, line, col } => {
+                Stmt::Let { name: name.clone(), value: inline_expr(value, candidates), line: *line, col: *col }
             }
-            Stmt::If { cond, then_block, else_block } => Stmt::If {
+            Stmt::Assign { name, value, line, col } => {
+                Stmt::Assign { name: name.clone(), value: inline_expr(value, candidates), line: *line, col: *col }
+            }
+            Stmt::If { cond, then_block, else_block, line, col } => Stmt::If {
                 cond: inline_expr(cond, candidates),
                 then_block: inline_stmts(then_block, candidates),
                 else_block: else_block.as_ref().map(|b| inline_stmts(b, candidates)),
+                line: *line,
+                col: *col,
             },
-            Stmt::While { cond, body } => {
-                Stmt::While { cond: inline_expr(cond, candidates), body: inline_stmts(body, candidates) }
+            Stmt::While { cond, body, line, col } => Stmt::While {
+                cond: inline_expr(cond, candidates),
+                body: inline_stmts(body, candidates),
+                line: *line,
+                col: *col,
+            },
+            Stmt::Print { args, line, col } => {
+                Stmt::Print { args: args.iter().map(|a| inline_expr(a, candidates)).collect(), line: *line, col: *col }
             }
-            Stmt::Print { args } => {
-                Stmt::Print { args: args.iter().map(|a| inline_expr(a, candidates)).collect() }
+            Stmt::Return { value, line, col } => {
+                Stmt::Return { value: value.as_ref().map(|e| inline_expr(e, candidates)), line: *line, col: *col }
             }
-            Stmt::Return { value } => {
-                Stmt::Return { value: value.as_ref().map(|e| inline_expr(e, candidates)) }
+            Stmt::ExprStmt { expr, line, col } => {
+                Stmt::ExprStmt { expr: inline_expr(expr, candidates), line: *line, col: *col }
             }
-            Stmt::ExprStmt { expr } => Stmt::ExprStmt { expr: inline_expr(expr, candidates) },
         })
         .collect()
 }
@@ -316,7 +325,7 @@ mod tests {
             .body
             .iter()
             .find_map(|s| match s {
-                Stmt::Let { name, value } if name == "z" => Some(value),
+                Stmt::Let { name, value, .. } if name == "z" => Some(value),
                 _ => None,
             })
             .unwrap();

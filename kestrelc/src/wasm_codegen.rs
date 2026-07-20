@@ -203,7 +203,7 @@ fn walk_slots(
 ) {
     for s in stmts {
         match s {
-            Stmt::Let { name, value } => {
+            Stmt::Let { name, value, .. } => {
                 let kind = slot_kind_for_let(value, known_lens);
                 if let SlotKind::Array { literal_len: Some(l) } = kind {
                     known_lens.insert(name.clone(), l);
@@ -441,14 +441,14 @@ impl<'a> FnWasm<'a> {
 
     fn gen_stmt(&mut self, s: &Stmt) -> WResult<()> {
         match s {
-            Stmt::Let { name, value } => self.gen_binding(name, value),
-            Stmt::Assign { name, value } => {
+            Stmt::Let { name, value, .. } => self.gen_binding(name, value),
+            Stmt::Assign { name, value, .. } => {
                 if !self.vars.contains_key(name) {
                     return Err(WasmError(format!("Assignment to unknown variable '{name}'")));
                 }
                 self.gen_binding(name, value)
             }
-            Stmt::If { cond, then_block, else_block } => {
+            Stmt::If { cond, then_block, else_block, .. } => {
                 self.gen_expr(cond)?;
                 self.func.instructions().i64_const(0).i64_ne(); // WASM `if` needs an i32 condition
                 self.func.instructions().if_(wasm_encoder::BlockType::Empty);
@@ -460,7 +460,7 @@ impl<'a> FnWasm<'a> {
                 self.func.instructions().end();
                 Ok(())
             }
-            Stmt::While { cond, body } => {
+            Stmt::While { cond, body, .. } => {
                 self.func.instructions().block(wasm_encoder::BlockType::Empty);
                 self.func.instructions().loop_(wasm_encoder::BlockType::Empty);
                 self.gen_expr(cond)?;
@@ -472,8 +472,8 @@ impl<'a> FnWasm<'a> {
                 self.func.instructions().end(); // end block
                 Ok(())
             }
-            Stmt::Print { args } => self.gen_print(args),
-            Stmt::Return { value } => {
+            Stmt::Print { args, .. } => self.gen_print(args),
+            Stmt::Return { value, .. } => {
                 match value {
                     Some(e) => self.gen_expr(e)?,
                     None => {
@@ -483,7 +483,7 @@ impl<'a> FnWasm<'a> {
                 self.func.instructions().return_();
                 Ok(())
             }
-            Stmt::ExprStmt { expr } => {
+            Stmt::ExprStmt { expr, .. } => {
                 self.gen_expr(expr)?;
                 self.func.instructions().drop();
                 Ok(())

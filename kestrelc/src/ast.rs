@@ -52,15 +52,34 @@ pub enum BinOp {
     Or,
 }
 
+// Every variant carries the line/col of its first token — statement
+// granularity, not full per-expression (see kestrel-DESIGN.md's roadmap
+// item 1: a span on every AST node, not just statements, is still future
+// work). This is enough to point purity/type-check errors at a real
+// source location instead of nothing, matching the granularity
+// kestrel.js's own checkPurity/checkTypes already report at.
 #[derive(Debug, Clone)]
 pub enum Stmt {
-    Let { name: String, value: Expr },
-    Assign { name: String, value: Expr },
-    If { cond: Expr, then_block: Vec<Stmt>, else_block: Option<Vec<Stmt>> },
-    While { cond: Expr, body: Vec<Stmt> },
-    Print { args: Vec<Expr> },
-    Return { value: Option<Expr> },
-    ExprStmt { expr: Expr },
+    Let { name: String, value: Expr, line: usize, col: usize },
+    Assign { name: String, value: Expr, line: usize, col: usize },
+    If { cond: Expr, then_block: Vec<Stmt>, else_block: Option<Vec<Stmt>>, line: usize, col: usize },
+    While { cond: Expr, body: Vec<Stmt>, line: usize, col: usize },
+    Print { args: Vec<Expr>, line: usize, col: usize },
+    Return { value: Option<Expr>, line: usize, col: usize },
+    ExprStmt { expr: Expr, line: usize, col: usize },
+}
+
+/// A checker-reported error (purity, `parallel_map` misuse, type
+/// mismatch) with a real source position — the statement it was found
+/// in, not the exact sub-expression (see the Stmt doc comment above).
+/// Shared by purity.rs and typecheck.rs so main.rs / lib.rs can format
+/// every checker's errors the same way lex/parse errors already are
+/// (see format_diagnostic).
+#[derive(Debug, Clone)]
+pub struct CheckError {
+    pub message: String,
+    pub line: usize,
+    pub col: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -72,6 +91,7 @@ pub struct Fn {
     pub where_clause: Option<Expr>,
     pub body: Vec<Stmt>,
     pub line: usize,
+    pub col: usize,
 }
 
 pub type Program = Vec<Fn>;

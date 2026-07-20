@@ -496,7 +496,7 @@ fn walk_slots(
 ) {
     for s in stmts {
         match s {
-            Stmt::Let { name, value } => {
+            Stmt::Let { name, value, .. } => {
                 let kind = slot_kind_for_let(value, known_lens);
                 if let SlotKind::Array { literal_len: Some(l) } = kind {
                     known_lens.insert(name.clone(), l);
@@ -663,18 +663,18 @@ impl<'a> FnCodegen<'a> {
 
     fn gen_stmt(&mut self, s: &Stmt) -> CgResult<bool> {
         match s {
-            Stmt::Let { name, value } => {
+            Stmt::Let { name, value, .. } => {
                 self.gen_binding(name, value)?;
                 Ok(false)
             }
-            Stmt::Assign { name, value } => {
+            Stmt::Assign { name, value, .. } => {
                 if !self.vars.contains_key(name) {
                     return Err(CodegenError(format!("Assignment to unknown variable '{name}'")));
                 }
                 self.gen_binding(name, value)?;
                 Ok(false)
             }
-            Stmt::If { cond, then_block, else_block } => {
+            Stmt::If { cond, then_block, else_block, .. } => {
                 let c = self.gen_expr(cond)?;
                 let then_blk = self.builder.create_block();
                 let else_blk = self.builder.create_block();
@@ -710,7 +710,7 @@ impl<'a> FnCodegen<'a> {
                     Ok(false)
                 }
             }
-            Stmt::While { cond, body } => {
+            Stmt::While { cond, body, .. } => {
                 let header_blk = self.builder.create_block();
                 let body_blk = self.builder.create_block();
                 let after_blk = self.builder.create_block();
@@ -734,11 +734,11 @@ impl<'a> FnCodegen<'a> {
                 self.builder.seal_block(after_blk);
                 Ok(false)
             }
-            Stmt::Print { args } => {
+            Stmt::Print { args, .. } => {
                 self.gen_print(args)?;
                 Ok(false)
             }
-            Stmt::Return { value } => {
+            Stmt::Return { value, .. } => {
                 let v = match value {
                     Some(e) => self.gen_expr(e)?,
                     None => self.builder.ins().iconst(types::I64, 0),
@@ -751,7 +751,7 @@ impl<'a> FnCodegen<'a> {
                 }
                 Ok(true)
             }
-            Stmt::ExprStmt { expr } => {
+            Stmt::ExprStmt { expr, .. } => {
                 self.gen_expr(expr)?;
                 Ok(false)
             }
