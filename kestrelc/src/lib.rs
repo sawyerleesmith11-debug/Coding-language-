@@ -2,6 +2,7 @@ pub mod ast;
 pub mod lexer;
 pub mod parser;
 pub mod purity;
+pub mod typecheck;
 pub mod wasm_codegen;
 
 #[cfg(feature = "native")]
@@ -27,6 +28,11 @@ pub fn compile_to_wasm_bytes(src: &str) -> Result<Vec<u8>, String> {
     let pmap_errors = purity::check_parallel_map(&program);
     if !pmap_errors.is_empty() {
         return Err(format!("parallel_map() check failed:\n  {}", pmap_errors.join("\n  ")));
+    }
+
+    let type_errors = typecheck::check_types(&program);
+    if !type_errors.is_empty() {
+        return Err(format!("Type check failed:\n  {}", type_errors.join("\n  ")));
     }
 
     if !program.iter().any(|f| f.name == "main") {

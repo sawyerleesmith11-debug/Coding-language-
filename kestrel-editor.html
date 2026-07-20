@@ -659,6 +659,159 @@ function checkParallelMap(program) {
   return errors;
 }
 
+// ============================== TYPE CHECKER ==============================
+// First honest version — see kestrel-DESIGN.md's roadmap for exactly what
+// this is and isn't. Types are still just written, not checked, as
+// declared annotations (`docs/SYNTAX.md`'s Types section) — this instead
+// infers each expression's value *kind* (Int or Bool) purely from
+// literals and operators, and rejects mixing them (`5 + true`, `!5`, a
+// literal number used directly as an `if`/`while` condition), plus a
+// plain function-call argument *count* mismatch. Deliberately does NOT
+// check a call site's argument kinds against the callee's declared
+// parameter type names — that needs a real decision about what
+// Kestrel's built-in types actually are, a bigger step than this. A
+// parameter's kind inside its own function body is always Unknown for
+// the same reason (its declared type name carries no kind information
+// yet) — every rule below only fires when it's *sure*, never guesses,
+// so a program that would otherwise run correctly is never rejected.
+const KIND = { INT: "int", BOOL: "bool", ARRAY: "array", STR: "str", UNKNOWN: "unknown" };
+
+function checkTypes(program) {
+  const errors = [];
+  const fns = new Map(program.map((f) => [f.name, f]));
+
+  function kindName(k) {
+    return k === KIND.UNKNOWN ? "unknown" : k;
+  }
+
+  function inferExpr(e, locals, errors) {
+    if (!e) return KIND.UNKNOWN;
+    switch (e.kind) {
+      case "num": return KIND.INT;
+      case "bool": return KIND.BOOL;
+      case "str": return KIND.STR;
+      case "ident": return locals.has(e.name) ? locals.get(e.name) : KIND.UNKNOWN;
+      case "array_lit":
+        e.elems.forEach((el) => inferExpr(el, locals, errors));
+        return KIND.ARRAY;
+      case "index": {
+        inferExpr(e.target, locals, errors);
+        const idxKind = inferExpr(e.index, locals, errors);
+        if (idxKind !== KIND.UNKNOWN && idxKind !== KIND.INT) {
+          errors.push(`array index must be a number, found ${kindName(idxKind)}`);
+        }
+        return KIND.INT; // Kestrel arrays are integer-valued so far
+      }
+      case "unary": {
+        const k = inferExpr(e.expr, locals, errors);
+        if (e.op === "-") {
+          if (k !== KIND.UNKNOWN && k !== KIND.INT) {
+            errors.push(`'-' needs a number, found ${kindName(k)}`);
+          }
+          return KIND.INT;
+        }
+        // e.op === "!"
+        if (k !== KIND.UNKNOWN && k !== KIND.BOOL) {
+          errors.push(`'!' needs a boolean, found ${kindName(k)}`);
+        }
+        return KIND.BOOL;
+      }
+      case "binop": {
+        const l = inferExpr(e.left, locals, errors);
+        const r = inferExpr(e.right, locals, errors);
+        const isNumeric = (k) => k === KIND.UNKNOWN || k === KIND.INT;
+        const isBoolean = (k) => k === KIND.UNKNOWN || k === KIND.BOOL;
+        switch (e.op) {
+          case "+": case "-": case "*": case "/": case "%":
+            if (!isNumeric(l) || !isNumeric(r)) {
+              errors.push(`'${e.op}' needs two numbers, found ${kindName(l)} and ${kindName(r)}`);
+            }
+            return KIND.INT;
+          case "<": case ">": case "<=": case ">=":
+            if (!isNumeric(l) || !isNumeric(r)) {
+              errors.push(`'${e.op}' needs two numbers, found ${kindName(l)} and ${kindName(r)}`);
+            }
+            return KIND.BOOL;
+          case "&&": case "||":
+            if (!isBoolean(l) || !isBoolean(r)) {
+              errors.push(`'${e.op}' needs two booleans, found ${kindName(l)} and ${kindName(r)}`);
+            }
+            return KIND.BOOL;
+          case "==": case "!=":
+            if (l !== KIND.UNKNOWN && r !== KIND.UNKNOWN && l !== r) {
+              errors.push(`'${e.op}' compares mismatched types: ${kindName(l)} and ${kindName(r)}`);
+            }
+            return KIND.BOOL;
+        }
+        return KIND.UNKNOWN;
+      }
+      case "call": {
+        if (e.name === "parallel_map") {
+          // Already validated by checkParallelMap; just infer the array arg.
+          inferExpr(e.args[1], locals, errors);
+          return KIND.ARRAY;
+        }
+        const callee = fns.get(e.name);
+        if (callee && callee.params.length !== e.args.length) {
+          errors.push(
+            `'${e.name}' expects ${callee.params.length} argument${callee.params.length === 1 ? "" : "s"}, got ${e.args.length}`
+          );
+        }
+        e.args.forEach((a) => inferExpr(a, locals, errors));
+        return KIND.UNKNOWN; // return kind isn't tracked yet
+      }
+      default:
+        return KIND.UNKNOWN;
+    }
+  }
+
+  function visitStmt(s, locals, errors) {
+    switch (s.kind) {
+      case "let": {
+        const k = inferExpr(s.value, locals, errors);
+        if (!locals.has(s.name)) locals.set(s.name, k);
+        break;
+      }
+      case "assign": {
+        const k = inferExpr(s.value, locals, errors);
+        const prior = locals.get(s.name);
+        if (prior !== undefined && prior !== KIND.UNKNOWN && k !== KIND.UNKNOWN && prior !== k) {
+          errors.push(`'${s.name}' was first bound as ${kindName(prior)}, can't assign ${kindName(k)} to it`);
+        }
+        break;
+      }
+      case "if": {
+        const k = inferExpr(s.cond, locals, errors);
+        if (k !== KIND.UNKNOWN && k !== KIND.BOOL) {
+          errors.push(`if-condition must be a boolean expression, found ${kindName(k)}`);
+        }
+        s.thenBlock.forEach((st) => visitStmt(st, locals, errors));
+        if (s.elseBlock) s.elseBlock.forEach((st) => visitStmt(st, locals, errors));
+        break;
+      }
+      case "while": {
+        const k = inferExpr(s.cond, locals, errors);
+        if (k !== KIND.UNKNOWN && k !== KIND.BOOL) {
+          errors.push(`while-condition must be a boolean expression, found ${kindName(k)}`);
+        }
+        s.body.forEach((st) => visitStmt(st, locals, errors));
+        break;
+      }
+      case "print": s.args.forEach((a) => inferExpr(a, locals, errors)); break;
+      case "return": if (s.value) inferExpr(s.value, locals, errors); break;
+      case "expr_stmt": inferExpr(s.expr, locals, errors); break;
+    }
+  }
+
+  for (const fn of program) {
+    const locals = new Map();
+    const fnErrors = [];
+    fn.body.forEach((s) => visitStmt(s, locals, fnErrors));
+    for (const e of fnErrors) errors.push(`in '${fn.name}': ${e}`);
+  }
+  return errors;
+}
+
 // ============================== INTERPRETER ==============================
 
 class KestrelError extends Error {
@@ -1183,6 +1336,10 @@ function run(src, opts = {}) {
   if (pmapErrors.length) {
     throw new KestrelError("parallel_map() check failed:\n  " + pmapErrors.join("\n  "));
   }
+  const typeErrors = checkTypes(program);
+  if (typeErrors.length) {
+    throw new KestrelError("Type check failed:\n  " + typeErrors.join("\n  "));
+  }
   const boundsNotes = checkBounds(program);
   const result = interpret(program, opts);
   return { result, boundsNotes };
@@ -1204,6 +1361,10 @@ function runFast(src, opts = {}) {
   if (pmapErrors.length) {
     throw new KestrelError("parallel_map() check failed:\n  " + pmapErrors.join("\n  "));
   }
+  const typeErrors = checkTypes(program);
+  if (typeErrors.length) {
+    throw new KestrelError("Type check failed:\n  " + typeErrors.join("\n  "));
+  }
   const boundsNotes = checkBounds(program);
   const functions = compile(program);
   const onPrint = opts.onPrint || ((s) => console.log(s));
@@ -1214,7 +1375,7 @@ function runFast(src, opts = {}) {
 // Export for Node; in the browser this file is loaded as a plain
 // <script>, and `Kestrel` is used as a global instead.
 const Kestrel = {
-  lex, parse, checkPurity, checkBounds, checkParallelMap, interpret, run,
+  lex, parse, checkPurity, checkBounds, checkParallelMap, checkTypes, interpret, run,
   compile, execute, runFast,
   KestrelError,
 };

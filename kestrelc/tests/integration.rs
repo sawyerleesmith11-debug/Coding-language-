@@ -823,3 +823,112 @@ fn wasm_backend_parallel_map_produces_correct_results() {
     assert!(run.status.success(), "node failed to run the wasm module:\n{}", String::from_utf8_lossy(&run.stderr));
     assert_eq!(String::from_utf8_lossy(&run.stdout), "1 4 9 16 25\n");
 }
+
+// ============================== type checker ==============================
+
+fn expect_type_error(scratch_name: &str, src: &str, expected_substr: &str) {
+    let scratch = scratch_dir(scratch_name);
+    let src_path = scratch.join("prog.kes");
+    fs::write(&src_path, src).unwrap();
+
+    let out = Command::new(kestrelc_bin())
+        .arg(&src_path)
+        .current_dir(&scratch)
+        .output()
+        .expect("failed to run kestrelc");
+    assert!(!out.status.success(), "kestrelc should have rejected this program:\n{src}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains(expected_substr),
+        "expected stderr to contain '{expected_substr}', got:\n{stderr}"
+    );
+}
+
+#[test]
+fn typecheck_rejects_mixing_a_number_and_a_boolean() {
+    expect_type_error("tc_add_bool", "fn main() {\n    print(5 + true);\n}\n", "needs two numbers");
+}
+
+#[test]
+fn typecheck_rejects_not_applied_to_a_number() {
+    expect_type_error("tc_not_int", "fn main() {\n    print(!5);\n}\n", "'!' needs a boolean");
+}
+
+#[test]
+fn typecheck_rejects_a_numeric_if_condition() {
+    expect_type_error(
+        "tc_if_int",
+        "fn main() {\n    if (5) {\n        print(1);\n    }\n}\n",
+        "if-condition must be a boolean",
+    );
+}
+
+#[test]
+fn typecheck_rejects_wrong_argument_count() {
+    expect_type_error(
+        "tc_arg_count",
+        "fn add(x: i32, y: i32) -> i32 { return x + y; }\nfn main() {\n    print(add(1, 2, 3));\n}\n",
+        "expects 2 arguments, got 3",
+    );
+}
+
+#[test]
+fn typecheck_rejects_reassigning_a_variable_to_a_different_kind() {
+    expect_type_error(
+        "tc_reassign",
+        "fn main() {\n    let x = 5;\n    x = true;\n}\n",
+        "was first bound as int",
+    );
+}
+
+#[test]
+fn typecheck_does_not_reject_legitimate_programs() {
+    // Both real examples must still compile cleanly with the type checker
+    // wired in — no false positives on working code.
+    let scratch = scratch_dir("tc_no_false_positives");
+    for name in ["basics.kes", "fibonacci.kes"] {
+        let (ok, stderr, _bin) = compile(name, &scratch);
+        assert!(ok, "kestrelc should still accept {name}:\n{stderr}");
+    }
+}
+
+#[test]
+fn typecheck_does_not_flag_a_boolean_returning_function_used_as_a_condition() {
+    // The callee's return kind isn't tracked (v1 scope), so this must be
+    // treated as Unknown and allowed through, not guessed at and rejected.
+    let scratch = scratch_dir("tc_unknown_call_kind");
+    let src_path = scratch.join("prog.kes");
+    fs::write(
+        &src_path,
+        "fn is_even(x: i32) -> bool { return x % 2 == 0; }\nfn main() {\n    if (is_even(4)) {\n        print(\"even\");\n    }\n}\n",
+    )
+    .unwrap();
+
+    let out = Command::new(kestrelc_bin())
+        .arg(&src_path)
+        .current_dir(&scratch)
+        .output()
+        .expect("failed to run kestrelc");
+    assert!(out.status.success(), "compile failed:\n{}", String::from_utf8_lossy(&out.stderr));
+
+    let bin = scratch.join("prog");
+    let run = Command::new(&bin).output().expect("failed to run compiled binary");
+    assert_eq!(String::from_utf8_lossy(&run.stdout), "even\n");
+}
+
+#[test]
+fn wasm_backend_typecheck_rejects_the_same_ill_typed_program() {
+    let scratch = scratch_dir("wasm_tc");
+    let src_path = scratch.join("prog.kes");
+    fs::write(&src_path, "fn main() {\n    print(5 + true);\n}\n").unwrap();
+
+    let out = Command::new(kestrelc_bin())
+        .arg("--wasm")
+        .arg(&src_path)
+        .current_dir(&scratch)
+        .output()
+        .expect("failed to run kestrelc");
+    assert!(!out.status.success(), "kestrelc --wasm should have rejected this program");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("needs two numbers"), "expected the type error, got:\n{stderr}");
+}

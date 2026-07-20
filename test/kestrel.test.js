@@ -452,3 +452,77 @@ describe("example programs", () => {
     );
   });
 });
+
+describe("checkTypes() — first honest type checker", () => {
+  test("rejects mixing a number and a boolean with an arithmetic operator", () => {
+    assert.throws(() => Kestrel.run(`fn main() { print(5 + true); }`), /needs two numbers/);
+  });
+
+  test("rejects '!' applied to a number", () => {
+    assert.throws(() => Kestrel.run(`fn main() { print(!5); }`), /'!' needs a boolean/);
+  });
+
+  test("rejects '&&'/'||' applied to numbers", () => {
+    assert.throws(() => Kestrel.run(`fn main() { print(1 && 2); }`), /needs two booleans/);
+  });
+
+  test("rejects a numeric literal used directly as an if-condition", () => {
+    assert.throws(() => Kestrel.run(`fn main() { if (5) { print(1); } }`), /if-condition must be a boolean/);
+  });
+
+  test("rejects a numeric literal used directly as a while-condition", () => {
+    assert.throws(() => Kestrel.run(`fn main() { while (0) { print(1); } }`), /while-condition must be a boolean/);
+  });
+
+  test("rejects a function call with the wrong number of arguments", () => {
+    assert.throws(
+      () => Kestrel.run(`
+        fn add(x: i32, y: i32) -> i32 { return x + y; }
+        fn main() { print(add(1, 2, 3)); }
+      `),
+      /'add' expects 2 arguments, got 3/
+    );
+  });
+
+  test("rejects reassigning a variable to a different kind than its first binding", () => {
+    assert.throws(() => Kestrel.run(`fn main() { let x = 5; x = true; }`), /was first bound as int/);
+  });
+
+  test("rejects comparing a number and a boolean with =='", () => {
+    assert.throws(() => Kestrel.run(`fn main() { print(5 == true); }`), /compares mismatched types/);
+  });
+
+  test("does not flag a legitimate program (no false positives)", () => {
+    const { output } = runCollect(`
+      pure fn square(x: i32) -> i32 { return x * x; }
+      fn main() {
+        let nums = [1, 2, 3];
+        let i = 0;
+        while (i < 3) {
+          print(square(nums[i]));
+          i = i + 1;
+        }
+        if (i == 3) { print("done"); }
+      }
+    `);
+    assert.deepEqual(output, ["1", "4", "9", "done"]);
+  });
+
+  test("does not flag a boolean-returning function call used as a condition (unknown kind, no guess)", () => {
+    const { output } = runCollect(`
+      fn is_even(x: i32) -> bool { return x % 2 == 0; }
+      fn main() {
+        if (is_even(4)) { print("even"); }
+      }
+    `);
+    assert.deepEqual(output, ["even"]);
+  });
+
+  test("does not flag a function parameter's kind (unknown until called)", () => {
+    const { output } = runCollect(`
+      fn double(x: i32) -> i32 { return x * 2; }
+      fn main() { print(double(21)); }
+    `);
+    assert.deepEqual(output, ["42"]);
+  });
+});

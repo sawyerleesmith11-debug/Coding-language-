@@ -323,8 +323,36 @@ off-the-shelf optimizing backend," not yet "compile *smarter* than a
 normal compiler would." That's the honest ceiling of what's measured
 here, and also exactly where the next work goes.
 
+**A real type checker now exists — a first, honestly-scoped version.**
+Types were previously written but not checked at all (see
+`docs/SYNTAX.md`'s Types section) — `i32`, `usize`, etc. were arbitrary
+identifiers with no semantic enforcement, so `foo(true, "hello")`
+compiled even if `foo` declared `(x: i32, y: i32)`. Rather than
+inventing a full built-in type system in one step, `check_types`
+(`kestrelc/src/typecheck.rs` and kestrel.js's `checkTypes`, wired into
+every backend) infers each expression's value *kind* (integer vs.
+boolean) purely from literals and operators — `true`/`false`/
+comparisons/`&&`/`||`/`!` are boolean, everything else numeric — and
+rejects mixing them (`5 + true`, `!5`, a literal number used directly
+as an `if`/`while` condition), plus a plain function-call argument
+*count* mismatch. Does **not** yet check declared parameter type
+*names* against call-site arguments (`foo(x: i32)` called as
+`foo(some_bool)` isn't caught yet) — that needs a real decision about
+what Kestrel's built-in types actually are first, a bigger design step
+than this. See `docs/SYNTAX.md`'s "Type checking" section for the exact
+rules and worked examples.
+
 Not yet implemented (future work, roughly in priority order):
-1. Proof-based bounds-check *elision* in `kestrelc` — **the design
+1. Better compile error locations — line *and* column *and* a length,
+   not just a line number, so an error can point at exactly the
+   offending span (`filename:14:7`, with a `^` under the bad token)
+   instead of just naming the line.
+2. Pure-function loop fusion and automatic memoization, extending idea
+   #2/#4's purity proof the same way `parallel_map` (idea #5) already
+   does — e.g. turning a chain of `pure fn` calls over an array into
+   one pass instead of several, or caching a `pure fn`'s result across
+   calls with the same arguments within a single run.
+3. Proof-based bounds-check *elision* in `kestrelc` — **the design
    doc's own `get_safe` example now works exactly as originally
    specified**: `where i < N` is proven at every call site (a literal
    index against a literal-length array), an unprovable call site is a
@@ -340,14 +368,14 @@ Not yet implemented (future work, roughly in priority order):
    is native-only so far — the WASM backend (`kestrelc --wasm` /
    `kestrelc-web`) has array support too, but still runtime-checks
    `where`-guarded accesses rather than eliding them.
-2. The full runtime-profile-guided version of the persistent cache (idea
+4. The full runtime-profile-guided version of the persistent cache (idea
    #1) — the on-disk/in-memory *compile-result* cache is done; branch/
    shape profiling and pre-specialization from it are not
-3. Layout polymorphism — blocked on structs/records existing at all
+5. Layout polymorphism — blocked on structs/records existing at all
    (Kestrel doesn't have them yet — see `docs/SYNTAX.md`), a
    prerequisite bigger than the layout-choice optimization itself
-4. A more general proof system beyond simple bounds checks
-5. SIMD, then (much further out) a GPU backend — both extensions of
+6. A more general proof system beyond simple bounds checks
+7. SIMD, then (much further out) a GPU backend — both extensions of
    idea #5's CPU-parallelism work, which now has a first real version
    (`parallel_map`, native backend only — see idea #5 above); a
    general-purpose work-stealing scheduler beyond the current one

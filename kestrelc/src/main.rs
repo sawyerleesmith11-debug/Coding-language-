@@ -1,4 +1,4 @@
-use kestrelc::{cache, codegen, lexer, parser, purity, wasm_codegen};
+use kestrelc::{cache, codegen, lexer, parser, purity, typecheck, wasm_codegen};
 
 use std::fs;
 use std::path::Path;
@@ -76,6 +76,15 @@ fn main() -> ExitCode {
     if !pmap_errors.is_empty() {
         eprintln!("kestrelc: parallel_map() check failed:");
         for e in &pmap_errors {
+            eprintln!("  {e}");
+        }
+        return ExitCode::FAILURE;
+    }
+
+    let type_errors = typecheck::check_types(&program);
+    if !type_errors.is_empty() {
+        eprintln!("kestrelc: Type check failed:");
+        for e in &type_errors {
             eprintln!("  {e}");
         }
         return ExitCode::FAILURE;

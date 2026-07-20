@@ -40,11 +40,17 @@ measured performance numbers.
 
 ## Types
 
-Types are written but **not checked** by the interpreter — `i32`,
-`usize`, etc. are accepted as arbitrary identifiers with no semantic
-enforcement (no overflow checking, no int/float distinction at
-runtime). They exist for the bounds-proof mechanism and as documentation
-for the eventual real backend.
+Declared type *names* (`i32`, `usize`, etc.) are still not checked
+against each other — they're accepted as arbitrary identifiers, with no
+overflow checking and no enforcement that a call site's argument
+actually matches a parameter's declared name. What **is** checked now
+(every backend): each expression's inferred value *kind* — integer or
+boolean, inferred purely from literals and operators, never from
+declared names — so `5 + true`, `!5`, and a plain number used directly
+as an `if`/`while` condition are compile errors, along with a
+function-call argument *count* mismatch. See "Type checking" below for
+the exact rules. `[i32; N]` array types exist for the bounds-proof
+mechanism and as documentation for the real backend.
 
 ```
 name: i32
@@ -116,6 +122,37 @@ pure fn oops(x: i32) -> i32 {
 
 This produces a compile-time `KestrelError` naming every offending
 function, before the program executes at all — not a runtime warning.
+
+## Type checking
+
+First honest version — see `kestrel-DESIGN.md`'s roadmap for the full
+rationale. Each expression's value *kind* (integer or boolean) is
+inferred purely from literals and operators — `true`/`false`,
+comparisons, `&&`/`||`/`!` are boolean; everything else is numeric —
+and mixing them is a compile error:
+
+```
+print(5 + true);   // Rejected: '+' needs two numbers, found int and bool
+print(!5);         // Rejected: '!' needs a boolean, found int
+if (5) { ... }      // Rejected: if-condition must be a boolean expression, found int
+```
+
+A function call with the wrong number of arguments is also rejected:
+
+```
+fn add(x: i32, y: i32) -> i32 { return x + y; }
+add(1, 2, 3);   // Rejected: 'add' expects 2 arguments, got 3
+```
+
+**What this deliberately doesn't do yet:** check a call site's argument
+*kinds* against the callee's declared parameter type names (`foo(x:
+i32)` called as `foo(some_bool)` isn't caught) — that needs a real
+decision about what Kestrel's built-in types actually are first, since
+today `i32`/`usize`/anything else are just arbitrary identifiers (see
+"Types" above). A function parameter's kind is always treated as
+unknown inside its own body for the same reason. Every rule only fires
+when it's *sure* — it never guesses, so a program that would otherwise
+run correctly is never rejected.
 
 ## Arrays & bounds proofs
 

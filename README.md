@@ -86,6 +86,11 @@ execution in `kestrelc`'s native backend — ~2.1x faster than sequential
 on this machine, purity alone as the safety proof, no `unsafe` — while
 every other backend (`run`, `runFast`, and the WASM backend) accepts
 the same programs and runs them sequentially, correctly, just not in
-parallel. Next up, in priority order: that fuller profile-guided cache,
-layout polymorphism (blocked on structs, which don't exist yet), and a
-more general proof system.
+parallel. There's now also a first, honestly-scoped **type checker**
+(every backend) — catches `5 + true`, `if (5) {...}`, and function
+calls with the wrong argument count at compile time, though it doesn't
+yet check declared parameter type names against call-site arguments;
+see `docs/SYNTAX.md`'s "Type checking" section. Next up, in priority
+order: better compile-error locations (line/column/span), pure-function
+loop fusion and memoization, the fuller profile-guided cache, and
+layout polymorphism (blocked on structs, which don't exist yet).
