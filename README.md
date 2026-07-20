@@ -29,13 +29,14 @@ for the syntax reference and grammar.
   *inside* the browser editor and compile Kestrel source to a runnable
   `.wasm` module client-side — no server, no native binary. See
   `kestrelc-web/README.md`.
-- `kestrel-editor.html` — a single-file mobile code editor/IDE (embeds
-  `kestrel.js` inline; add to iPhone home screen via Safari for an
-  app-like experience). Its engine picker offers all three backends,
-  including "native (wasm)" for near-native speed via `kestrelc-web`.
-  Auto-deployed to GitHub Pages on every push to `main` (see
-  `.github/workflows/pages.yml`, which also builds `kestrelc-web` and
-  publishes it alongside the editor).
+- `kestrel-editor.html` — a mobile code editor/IDE (loads `kestrel.js`
+  via a `<script src>` tag rather than an embedded copy, so interpreter
+  changes need no manual mirroring; add to iPhone home screen via
+  Safari for an app-like experience). Its engine picker offers all
+  three backends, including "native (wasm)" for near-native speed via
+  `kestrelc-web`. Auto-deployed to GitHub Pages on every push to `main`
+  (see `.github/workflows/pages.yml`, which builds `kestrelc-web` and
+  publishes `kestrel.js` alongside the editor).
 - `docs/SYNTAX.md` — syntax reference and full grammar.
 - `examples/` — runnable example programs:
   - `basics.kes` — `pure fn`, arrays, `where`-bounded access.

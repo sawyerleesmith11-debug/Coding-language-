@@ -30,6 +30,7 @@ jobs:
         run: |
           mkdir -p _site
           cp kestrel-editor.html _site/index.html
+          cp kestrel.js _site/kestrel.js
           cp kestrelc-web/target/wasm32-unknown-unknown/release/kestrelc_web.wasm _site/kestrelc.wasm
       - uses: actions/upload-pages-artifact@v3
         with:
