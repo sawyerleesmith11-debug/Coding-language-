@@ -11,6 +11,10 @@ pub mod where_info;
 pub mod cache;
 #[cfg(feature = "native")]
 pub mod codegen;
+#[cfg(feature = "native")]
+pub mod inline;
+#[cfg(feature = "native")]
+pub mod profile;
 
 /// Formats a diagnostic the way every kestrelc entry point (the CLI, and
 /// `compile_to_wasm_bytes` below) reports lex/parse errors: `file:line:col:

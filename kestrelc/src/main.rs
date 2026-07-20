@@ -1,4 +1,4 @@
-use kestrelc::{cache, codegen, format_diagnostic, fusion, lexer, parser, purity, typecheck, wasm_codegen};
+use kestrelc::{cache, codegen, format_diagnostic, fusion, inline, lexer, parser, profile, purity, typecheck, wasm_codegen};
 
 use std::fs;
 use std::path::Path;
@@ -30,11 +30,22 @@ fn main() -> ExitCode {
     // lexing/parsing/purity-checking/codegen entirely and reuse the
     // artifact. See kestrelc/src/cache.rs for the scope and the honest
     // gap between this and kestrel-DESIGN.md idea #1's full vision.
-    let cache_mode = if wasm { "wasm" } else { "native" };
-    let cache_key = cache::key(&src, cache_mode);
-    let cache_ext = if wasm { "wasm" } else { "o" };
-    if let Some(cached) = cache::read(&cache_key, cache_ext) {
-        if wasm {
+    //
+    // The native backend's cache key additionally folds in a fingerprint
+    // of the current runtime call-count profile (see profile.rs) — a
+    // program that's actually been *run* since it last compiled may now
+    // compile differently (see inline.rs), so a cache hit keyed only on
+    // source text would silently keep serving the pre-profile object
+    // forever, and the whole feedback loop would never actually fire.
+    // `source_key` (profile-file naming) stays stable across that churn
+    // on purpose; only the artifact key changes.
+    let wasm_cache_key = cache::key(&src, "wasm");
+    let source_key = cache::key(&src, "native");
+    let profile_map = profile::read(&source_key);
+    let profile_fingerprint = profile::fingerprint(&profile_map);
+    let native_artifact_key = cache::artifact_key(&src, "native", &profile_fingerprint);
+    if wasm {
+        if let Some(cached) = cache::read(&wasm_cache_key, "wasm") {
             let out_path = format!("{stem}.wasm");
             if let Err(e) = fs::write(&out_path, &cached) {
                 eprintln!("kestrelc: failed to write '{out_path}': {e}");
@@ -42,9 +53,9 @@ fn main() -> ExitCode {
             }
             println!("kestrelc: wrote ./{out_path} (cached)");
             return ExitCode::SUCCESS;
-        } else {
-            return link_and_report(&cached, &stem, true);
         }
+    } else if let Some(cached) = cache::read(&native_artifact_key, "o") {
+        return link_and_report(&cached, &stem, true);
     }
 
     let tokens = match lexer::lex(&src) {
@@ -110,12 +121,22 @@ fn main() -> ExitCode {
             eprintln!("kestrelc: failed to write '{out_path}': {e}");
             return ExitCode::FAILURE;
         }
-        cache::write(&cache_key, cache_ext, &bytes);
+        cache::write(&wasm_cache_key, "wasm", &bytes);
         println!("kestrelc: wrote ./{out_path}");
         return ExitCode::SUCCESS;
     }
 
-    let mut cg = match codegen::Codegen::new() {
+    // Rewrites call sites of small, pure, previously-hot functions (per
+    // `profile_map`, from the last time this exact source actually ran)
+    // to inline their bodies directly — see inline.rs for the exact,
+    // deliberately narrow eligibility rules. A no-op (returns `program`
+    // unchanged) until a profile exists at all, which is exactly why the
+    // very first compile of any given source behaves identically to
+    // before this existed.
+    let program = inline::inline_hot_fns(&program, &profile_map);
+
+    let profile_path = profile::profile_path(&source_key).map(|p| p.to_string_lossy().into_owned());
+    let mut cg = match codegen::Codegen::new(profile_path) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("kestrelc: {}", e.0);
@@ -127,7 +148,7 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     let object_bytes = cg.finish();
-    cache::write(&cache_key, cache_ext, &object_bytes);
+    cache::write(&native_artifact_key, "o", &object_bytes);
     link_and_report(&object_bytes, &stem, false)
 }
 

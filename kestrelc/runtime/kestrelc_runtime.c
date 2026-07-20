@@ -18,6 +18,7 @@
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #ifdef _WIN32
 #include <windows.h>
 #else
@@ -130,4 +131,104 @@ void kestrelc_parallel_map_i64(const long long* in, long long len, long long (*f
 void kestrelc_bounds_fail(long long idx, long long len) {
     fprintf(stderr, "kestrelc: Index %lld out of bounds for array of length %lld\n", idx, len);
     exit(1);
+}
+
+// Small in-memory table of a *previous* run's recorded counts, loaded
+// once (on the first kestrelc_profile_record call of this process) so
+// every subsequent call in the same flush sequence can look up "what did
+// we already know about this function." Kestrel programs compiled by
+// kestrelc so far are small (a handful of functions), so a fixed-size
+// linear-scan table is plenty — this isn't meant to scale to a large
+// program, just to avoid a second file format/library dependency for
+// something this size.
+#define KESTRELC_PROFILE_MAX_ENTRIES 512
+typedef struct { char* name; long long len; long long count; } kestrelc_profile_entry;
+static kestrelc_profile_entry kestrelc_profile_prev[KESTRELC_PROFILE_MAX_ENTRIES];
+static int kestrelc_profile_prev_n = 0;
+static int kestrelc_profile_prev_loaded = 0;
+
+static void kestrelc_profile_load_prev(const char* path) {
+    kestrelc_profile_prev_loaded = 1;
+    FILE* f = fopen(path, "r");
+    if (!f) {
+        return;
+    }
+    char line[1024];
+    while (kestrelc_profile_prev_n < KESTRELC_PROFILE_MAX_ENTRIES && fgets(line, sizeof(line), f)) {
+        char* sp = strrchr(line, ' ');
+        if (!sp) {
+            continue;
+        }
+        *sp = 0;
+        long long count = atoll(sp + 1);
+        long long len = (long long)strlen(line);
+        char* copy = malloc((size_t)len + 1);
+        if (!copy) {
+            break;
+        }
+        memcpy(copy, line, (size_t)len + 1);
+        kestrelc_profile_entry* e = &kestrelc_profile_prev[kestrelc_profile_prev_n++];
+        e->name = copy;
+        e->len = len;
+        e->count = count;
+    }
+    fclose(f);
+}
+
+static long long kestrelc_profile_prev_count(const char* name, long long name_len) {
+    for (int i = 0; i < kestrelc_profile_prev_n; i++) {
+        if (kestrelc_profile_prev[i].len == name_len && memcmp(kestrelc_profile_prev[i].name, name, (size_t)name_len) == 0) {
+            return kestrelc_profile_prev[i].count;
+        }
+    }
+    return 0;
+}
+
+// Appends one "<name> <count>\n" line to the profile file kestrelc
+// embedded as data in this program's own object file (see codegen.rs's
+// ProfileState) — one call per function, emitted in `main`'s epilogue
+// once every explicit `return` (and any implicit fall-off-the-end) has
+// been redirected there instead of returning directly. Not called at
+// all for wasm or when no compile cache directory is available (see
+// codegen.rs) — this file only exists to feed the *next* `kestrelc`
+// invocation's inlining pass (see inline.rs), never anything the
+// running program itself reads.
+//
+// Written count is `max(this run's count, the previous run's recorded
+// count)`, not just this run's raw count — critical for the feedback
+// loop to actually settle instead of oscillating forever: once a
+// function is inlined at its call sites (because a previous run showed
+// it was hot), the *next* run's compiled binary no longer contains any
+// real calls to it, so its own counter would read back as 0. Recording
+// a raw 0 would make the compiler after *that* run conclude "not hot
+// anymore" and un-inline it — which makes it hot again next run — an
+// infinite flip-flop. Keeping the historical high-water mark instead
+// means "was ever called this often" stays true once observed, so a
+// function that's been proven worth inlining stays inlined.
+//
+// Byte counts, not null-terminated C strings, since both the path and
+// the function name are raw pointers into this object's own read-only
+// data section — safe to bound with an explicit length, no assumption
+// about what follows them in memory.
+void kestrelc_profile_record(const char* path, long long path_len, const char* name, long long name_len, long long count, int is_first) {
+    if (path_len < 0 || path_len >= 4096 || name_len < 0) {
+        return;
+    }
+    char pbuf[4096];
+    memcpy(pbuf, path, (size_t)path_len);
+    pbuf[path_len] = 0;
+
+    if (!kestrelc_profile_prev_loaded) {
+        kestrelc_profile_load_prev(pbuf);
+    }
+    long long prev = kestrelc_profile_prev_count(name, name_len);
+    long long merged = count > prev ? count : prev;
+
+    FILE* f = fopen(pbuf, is_first ? "w" : "a");
+    if (!f) {
+        return;
+    }
+    fwrite(name, 1, (size_t)name_len, f);
+    fprintf(f, " %lld\n", merged);
+    fclose(f);
 }

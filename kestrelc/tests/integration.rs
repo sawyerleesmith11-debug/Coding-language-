@@ -1132,3 +1132,130 @@ fn wasm_backend_typecheck_rejects_the_same_ill_typed_program() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("needs two numbers"), "expected the type error, got:\n{stderr}");
 }
+
+// ==================== runtime call-count profile / inlining ====================
+
+#[test]
+fn native_run_writes_a_call_count_profile_next_to_the_compile_cache() {
+    let scratch = scratch_dir("profile_write");
+    let cache_dir = scratch.join("cache");
+    let src_path = scratch.join("prog.kes");
+    fs::write(
+        &src_path,
+        "pure fn double(x: i64) -> i64 { return x * 2; }\n\
+         fn main() {\n\
+         \x20   let i = 0;\n\
+         \x20   let sum = 0;\n\
+         \x20   while (i < 10) {\n\
+         \x20       sum = sum + double(i);\n\
+         \x20       i = i + 1;\n\
+         \x20   }\n\
+         \x20   print(sum);\n\
+         }\n",
+    )
+    .unwrap();
+
+    let compiled = Command::new(kestrelc_bin())
+        .arg(&src_path)
+        .current_dir(&scratch)
+        .env("KESTRELC_CACHE_DIR", &cache_dir)
+        .output()
+        .expect("failed to run kestrelc");
+    assert!(compiled.status.success(), "compile failed:\n{}", String::from_utf8_lossy(&compiled.stderr));
+
+    let bin = scratch.join("prog");
+    let run = Command::new(&bin).output().expect("failed to run compiled binary");
+    assert!(run.status.success(), "compiled binary exited with failure");
+    assert_eq!(native_stdout(&run), "90\n"); // 2*(0+1+...+9) = 90
+
+    let profile_file = fs::read_dir(&cache_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .find(|e| e.path().extension().map(|ext| ext == "profile").unwrap_or(false))
+        .unwrap_or_else(|| panic!("no .profile file written to {}", cache_dir.display()))
+        .path();
+    let profile_text = fs::read_to_string(&profile_file).unwrap();
+    assert!(
+        profile_text.lines().any(|l| l.starts_with("double ") && l.trim_end().ends_with("10")),
+        "expected 'double 10' in the profile, got:\n{profile_text}"
+    );
+}
+
+#[test]
+fn native_recompile_after_a_run_produces_a_different_cache_entry_and_still_runs_correctly() {
+    // The whole point of a *runtime-feedback* cache (kestrel-DESIGN.md
+    // idea #1) is that compiling the same source twice can legitimately
+    // produce two different artifacts if the program actually ran in
+    // between — this is the end-to-end proof that the loop really
+    // fires, not just that inline.rs's AST-level unit tests pass in
+    // isolation (see fusion.rs's history: an AST transform that "looks
+    // right" still miscompiled until an end-to-end test caught it).
+    let scratch = scratch_dir("profile_recompile");
+    let cache_dir = scratch.join("cache");
+    let src_path = scratch.join("prog.kes");
+    fs::write(
+        &src_path,
+        "pure fn double(x: i64) -> i64 { return x * 2; }\n\
+         fn main() {\n\
+         \x20   let i = 0;\n\
+         \x20   let sum = 0;\n\
+         \x20   while (i < 10) {\n\
+         \x20       sum = sum + double(i);\n\
+         \x20       i = i + 1;\n\
+         \x20   }\n\
+         \x20   print(sum);\n\
+         }\n",
+    )
+    .unwrap();
+
+    let first_compile = Command::new(kestrelc_bin())
+        .arg(&src_path)
+        .current_dir(&scratch)
+        .env("KESTRELC_CACHE_DIR", &cache_dir)
+        .output()
+        .expect("failed to run kestrelc");
+    assert!(first_compile.status.success());
+    assert!(
+        !String::from_utf8_lossy(&first_compile.stdout).contains("(cached)"),
+        "first compile (no profile yet) should be a cache miss"
+    );
+
+    let bin = scratch.join("prog");
+    let first_run = Command::new(&bin).output().expect("failed to run compiled binary");
+    assert_eq!(native_stdout(&first_run), "90\n");
+
+    // Same source, but a profile now exists from the run above — the
+    // artifact cache key folds in a fingerprint of it (see
+    // cache::artifact_key), so this must NOT be a cache hit even though
+    // the .kes file on disk hasn't changed a single byte.
+    let second_compile = Command::new(kestrelc_bin())
+        .arg(&src_path)
+        .current_dir(&scratch)
+        .env("KESTRELC_CACHE_DIR", &cache_dir)
+        .output()
+        .expect("failed to run kestrelc");
+    assert!(second_compile.status.success(), "recompile failed:\n{}", String::from_utf8_lossy(&second_compile.stderr));
+    assert!(
+        !String::from_utf8_lossy(&second_compile.stdout).contains("(cached)"),
+        "recompile after a run (new profile data) should not reuse the pre-profile cache entry"
+    );
+
+    let second_run = Command::new(&bin).output().expect("failed to run recompiled binary");
+    assert!(second_run.status.success(), "recompiled binary exited with failure");
+    assert_eq!(native_stdout(&second_run), "90\n", "inlining must never change a program's actual output");
+
+    // A third compile, with the same (now-stable) profile data, should
+    // finally hit the cache — proves the loop settles instead of
+    // recompiling forever.
+    let third_compile = Command::new(kestrelc_bin())
+        .arg(&src_path)
+        .current_dir(&scratch)
+        .env("KESTRELC_CACHE_DIR", &cache_dir)
+        .output()
+        .expect("failed to run kestrelc");
+    assert!(
+        String::from_utf8_lossy(&third_compile.stdout).contains("(cached)"),
+        "expected the third compile (unchanged source, unchanged profile) to hit the cache, got:\n{}",
+        String::from_utf8_lossy(&third_compile.stdout)
+    );
+}

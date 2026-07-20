@@ -22,7 +22,11 @@ use std::path::PathBuf;
 /// hit. Cache misses are always safe (just slower); cache *hits* must
 /// only ever happen for byte-identical input to a byte-identical
 /// compiler, which this guards.
-const CACHE_FORMAT_VERSION: &str = "v1";
+///
+/// v2: the native artifact cache key changed shape (see `artifact_key`)
+/// to fold in a profile fingerprint — bumped so no v1 entry is ever
+/// misread as a v2 one keyed on a coincidentally-matching hash.
+const CACHE_FORMAT_VERSION: &str = "v2";
 
 /// Where cache entries live: `$KESTRELC_CACHE_DIR` if set, else
 /// `$XDG_CACHE_HOME/kestrelc`, else `$HOME/.cache/kestrelc`, else `None`
@@ -47,7 +51,7 @@ pub fn dir() -> Option<PathBuf> {
 /// algorithm Rust explicitly reserves the right to change between
 /// releases), so cache entries stay valid across `kestrelc` rebuilds
 /// with the same `CACHE_FORMAT_VERSION`.
-fn fnv1a64(bytes: &[u8]) -> u64 {
+pub(crate) fn fnv1a64(bytes: &[u8]) -> u64 {
     let mut hash: u64 = 0xcbf29ce484222325;
     for &b in bytes {
         hash ^= b as u64;
@@ -64,6 +68,26 @@ pub fn key(src: &str, mode: &str) -> String {
     input.push_str(CACHE_FORMAT_VERSION);
     input.push('|');
     input.push_str(mode);
+    input.push('|');
+    input.push_str(src);
+    format!("{:016x}", fnv1a64(input.as_bytes()))
+}
+
+/// The native-backend compile-artifact cache key: like `key`, but also
+/// folds in `profile_fingerprint` (see profile::fingerprint) so a
+/// recompile that picks up *new* runtime profile data — and therefore
+/// might inline differently (see inline.rs) — never reuses an object
+/// file compiled under old or absent profile data. `profile_fingerprint`
+/// is the empty string when no profile exists yet, which is exactly the
+/// same input `key()` itself would've hashed before profile-guided
+/// inlining existed, modulo the version bump above.
+pub fn artifact_key(src: &str, mode: &str, profile_fingerprint: &str) -> String {
+    let mut input = String::with_capacity(src.len() + 32);
+    input.push_str(CACHE_FORMAT_VERSION);
+    input.push('|');
+    input.push_str(mode);
+    input.push('|');
+    input.push_str(profile_fingerprint);
     input.push('|');
     input.push_str(src);
     format!("{:016x}", fnv1a64(input.as_bytes()))

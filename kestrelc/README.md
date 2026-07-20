@@ -105,11 +105,40 @@ for byte-identical input.
 Cache location: `$KESTRELC_CACHE_DIR`, else `$XDG_CACHE_HOME/kestrelc`,
 else `$HOME/.cache/kestrelc`, else caching is silently skipped (compiles
 still work, just without the speedup). Delete the directory to clear it.
-See `src/cache.rs` for the implementation, and
-`kestrel-DESIGN.md`'s idea #1 for how this relates to (and how it's
-scoped down from) the fuller runtime-profile-guided cache described
-there — this is "skip redundant recompilation," not (yet) branch/shape
-profiling or speculative pre-specialization.
+See `src/cache.rs` for the implementation.
+
+## Runtime call-count profiling and inlining (native only)
+
+The native backend goes one step further than "skip redundant
+recompilation": every compiled binary counts how many times each of its
+own functions actually ran, and writes those counts to a small profile
+file next to its cache entry when it exits (`src/profile.rs`,
+`runtime/kestrelc_runtime.c`'s `kestrelc_profile_record`). The *next*
+`kestrelc` compile of that same source reads the file back and inlines
+small, pure, non-recursive functions with only scalar parameters that
+were called at least 5 times in a previous run (`src/inline.rs`) —
+saving real call overhead at whichever sites turned out to matter, based
+on how the program actually ran, not a static guess. Because the
+compiled artifact can now legitimately differ for byte-identical source
+depending on what profile data exists, the compile-cache key for the
+native backend folds in a fingerprint of the current profile (see
+`cache::artifact_key`); the profile file's own path stays stable
+(`cache::key`) so it isn't lost across that.
+
+Recorded counts are a running historical maximum, not each run's raw
+number — necessary for the loop to settle. Once a function is inlined,
+its own compiled body has no call sites left calling it, so a fresh
+binary's raw count for it would read back as 0; recording that naively
+would make the next compiler run conclude "not hot anymore," un-inline
+it, make it hot again next run, forever. Keeping the highest count ever
+observed avoids that flip-flop.
+
+Honest scope: call-count-driven inlining only, not the fuller
+branch/shape-profiling and speculative pre-specialization
+`kestrel-DESIGN.md`'s idea #1 describes as the end goal — and not
+transitive (if hot function A's body calls hot function B, A's inlined
+copy still calls B as a real function). WASM has no persistent profile
+at all (no filesystem in a browser); this is native-only.
 
 ## Scope
 

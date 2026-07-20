@@ -33,22 +33,46 @@ Trade-off to be honest about: this only helps for programs run
 repeatedly on the same machine (servers, CLIs, dev loops) — a one-shot
 script gets no benefit.
 
-**What's actually implemented is a smaller, real first step, not this
-full vision:** `kestrelc` now has a persistent, on-disk, cross-invocation
-*compile* cache (`kestrelc/src/cache.rs`) — if the exact same source text
-has compiled successfully before, a later `kestrelc` invocation skips
-lexing/parsing/purity-checking/codegen entirely and reuses the cached
-artifact (object file for the native backend, `.wasm` bytes for the WASM
-one), keyed by a content hash of the source. This is the boring, honest
-80%: "don't redo work you've already done," not runtime branch/shape
-profiling or speculative pre-specialization — no execution feedback loop
-exists yet. `kestrel-editor.html`'s native engine has the same idea at a
-smaller, session-only scale: an in-memory `Map` keyed by source text, so
-clicking Run repeatedly on unchanged code skips recompilation without
-needing a filesystem (the browser's `kestrelc-web` has none). Real,
-measured win either way — e.g. a cached `kestrelc-web` compile in the
-editor dropped from ~22ms to ~0.6ms — but the actual profile-guided
-pre-specialization described above is still future work.
+**What's actually implemented, in two steps — the second one is now a
+real (if narrow) execution feedback loop, not just "skip redundant
+work":**
+
+1. `kestrelc` has a persistent, on-disk, cross-invocation *compile*
+   cache (`kestrelc/src/cache.rs`) — if the exact same source text (and,
+   for the native backend, the exact same runtime profile data — see
+   below) has compiled successfully before, a later `kestrelc`
+   invocation skips lexing/parsing/purity-checking/codegen entirely and
+   reuses the cached artifact (object file for the native backend,
+   `.wasm` bytes for the WASM one). `kestrel-editor.html`'s native engine
+   has the same idea at a smaller, session-only scale: an in-memory `Map`
+   keyed by source text, so clicking Run repeatedly on unchanged code
+   skips recompilation without needing a filesystem (the browser's
+   `kestrelc-web` has none). Real, measured win either way — e.g. a
+   cached `kestrelc-web` compile in the editor dropped from ~22ms to
+   ~0.6ms.
+2. The native backend also has real, if scoped-down, runtime-profile-
+   guided compilation: every compiled program counts how many times each
+   of its own functions actually got called and writes those counts to a
+   profile file next to its compile-cache entry when it exits
+   (`kestrelc/runtime/kestrelc_runtime.c`'s `kestrelc_profile_record`,
+   called from codegen-generated instrumentation — see
+   `kestrelc/src/profile.rs`). The *next* compile of that same source
+   reads the file back and inlines small, pure, non-recursive,
+   scalar-parameter functions that were called often enough
+   (`kestrelc/src/inline.rs`) — real call-overhead savings driven by how
+   the program was actually used last time, not a static guess.
+   Recorded counts are a historical high-water mark (`max` with the
+   previous run's count, not a raw overwrite) so the loop settles
+   instead of oscillating: a function proven hot once and inlined away
+   would otherwise show 0 calls in its own now-call-site-free binary,
+   getting un-inlined next compile, becoming hot again, forever.
+
+Honest scope of #2, matching the rest of this document's stated
+standard: call counts only — not the branch-taken/data-shape profiling
+the vision above describes, and not transitive (a hot function whose own
+body calls another hot function keeps that inner call as a real call,
+not further inlined). WASM has no persistent profile (no filesystem in
+the browser), so this is native-only.
 
 ## 2. Effect-tracked purity
 **Status: extension of known ideas (Haskell's purity + Rust's ownership)**
@@ -315,13 +339,15 @@ functions/recursion, `print`, and arrays so far — no strings as general
 values, and cross-function `where`-clause bounds elision is native-only
 for now (see `kestrelc/README.md` for the exact scope and why). And most
 of the *interesting* ideas in this document — layout polymorphism, a
-more general proof system beyond array bounds — aren't implemented in
-`kestrelc` at all yet (the persistent cache has a real first step now,
-see idea #1 above, but not its full runtime-profile-guided vision); this
-is still mostly "compile straight to machine code with a mature,
-off-the-shelf optimizing backend," not yet "compile *smarter* than a
-normal compiler would." That's the honest ceiling of what's measured
-here, and also exactly where the next work goes.
+more general proof system beyond array bounds — still aren't implemented
+in `kestrelc` at all (the persistent cache now has a real, if narrow,
+runtime feedback loop — call-count-driven inlining, see idea #1 above —
+but not the branch/shape profiling or general pre-specialization its
+full vision describes); this is still mostly "compile straight to
+machine code with a mature, off-the-shelf optimizing backend," not yet
+"compile *smarter* than a normal compiler would." That's the honest
+ceiling of what's measured here, and also exactly where the next work
+goes.
 
 **A real type checker now exists — a first, honestly-scoped version.**
 Types were previously written but not checked at all (see
@@ -467,8 +493,10 @@ Not yet implemented (future work, roughly in priority order):
    length M` — in both backends, instead of a bare trap with no
    indication of what went wrong.
 4. The full runtime-profile-guided version of the persistent cache (idea
-   #1) — the on-disk/in-memory *compile-result* cache is done; branch/
-   shape profiling and pre-specialization from it are not
+   #1) — call-count-driven inlining of small hot pure functions is now
+   real (native backend only; see idea #1 above and `kestrelc/src/
+   profile.rs` / `inline.rs`), but branch-taken/data-shape profiling and
+   general pre-specialization from it are not
 5. Layout polymorphism — blocked on structs/records existing at all
    (Kestrel doesn't have them yet — see `docs/SYNTAX.md`), a
    prerequisite bigger than the layout-choice optimization itself

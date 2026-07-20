@@ -8,7 +8,7 @@
 use crate::ast::*;
 use crate::where_info::{extract_where_info, WhereInfo};
 use cranelift_codegen::ir::{
-    condcodes::IntCC, types, AbiParam, Function, InstBuilder, MemFlags, Signature, StackSlotData,
+    condcodes::IntCC, types, AbiParam, Block, Function, InstBuilder, MemFlags, Signature, StackSlotData,
     StackSlotKind, TrapCode, UserFuncName, Value,
 };
 use cranelift_codegen::isa::CallConv;
@@ -25,12 +25,31 @@ struct StrConst {
     data_id: DataId,
 }
 
+/// Set up once in `compile_program` when a compile-cache directory is
+/// available (see cache::dir()) — the same "caching is always optional,
+/// never load-bearing" rule as cache.rs: no cache dir just means no
+/// profile is ever written, not a compile failure. `counters` holds one
+/// writable, zero-initialized i64 data cell per function, incremented on
+/// every entry to that function (see `compile_fn`); `entries` is the
+/// same information in declaration order, plus each function's
+/// interned-name data, used only once — by `main`'s epilogue — to emit
+/// the actual `kestrelc_profile_record` calls that flush every counter
+/// to disk right before the program actually exits.
+struct ProfileState {
+    path_data: DataId,
+    path_len: usize,
+    record_id: FuncId,
+    counters: HashMap<String, DataId>,
+    entries: Vec<(DataId, usize, DataId)>, // (name_data, name_len, counter_data), in declaration order
+}
+
 pub struct Codegen {
     module: ObjectModule,
     fn_ids: HashMap<String, FuncId>,
     printf_id: FuncId,
     pmap_id: FuncId,
     bounds_fail_id: FuncId,
+    profile: Option<ProfileState>,
     str_cache: HashMap<String, StrConst>,
     str_counter: usize,
     where_info: HashMap<String, WhereInfo>,
@@ -45,7 +64,12 @@ pub struct Codegen {
 }
 
 impl Codegen {
-    pub fn new() -> Result<Self, CodegenError> {
+    /// `profile_path`: the absolute path this compiled binary's own
+    /// profile-record calls should write to, if the compile cache
+    /// directory is available (see cache::dir() / profile::profile_path)
+    /// — `None` means "don't instrument at all," same optional-caching
+    /// posture as everywhere else this cache touches codegen.
+    pub fn new(profile_path: Option<String>) -> Result<Self, CodegenError> {
         let mut flag_builder = settings::builder();
         flag_builder.set("is_pic", "true").map_err(|e| CodegenError(e.to_string()))?;
         flag_builder.set("opt_level", "speed").map_err(|e| CodegenError(e.to_string()))?;
@@ -121,12 +145,51 @@ impl Codegen {
             .declare_function("kestrelc_bounds_fail", Linkage::Import, &bounds_fail_sig)
             .map_err(|e| CodegenError(e.to_string()))?;
 
+        // kestrelc_profile_record(path: i64 ptr, path_len: i64, name: i64
+        // ptr, name_len: i64, count: i64, is_first: i32) -> () — declared
+        // unconditionally, same as the three functions above, whether or
+        // not this compile actually ends up instrumented (`profile` may
+        // still be None below); the C runtime shim always defines it, so
+        // there's nothing conditional to gate at the linker level either.
+        let mut profile_record_sig = Signature::new(call_conv);
+        profile_record_sig.params.push(AbiParam::new(types::I64)); // path ptr
+        profile_record_sig.params.push(AbiParam::new(types::I64)); // path len
+        profile_record_sig.params.push(AbiParam::new(types::I64)); // name ptr
+        profile_record_sig.params.push(AbiParam::new(types::I64)); // name len
+        profile_record_sig.params.push(AbiParam::new(types::I64)); // count
+        profile_record_sig.params.push(AbiParam::new(types::I32)); // is_first
+        let profile_record_id = module
+            .declare_function("kestrelc_profile_record", Linkage::Import, &profile_record_sig)
+            .map_err(|e| CodegenError(e.to_string()))?;
+
+        let profile = match profile_path {
+            Some(path) => {
+                let path_bytes = path.into_bytes();
+                let path_len = path_bytes.len();
+                let path_data = module
+                    .declare_data("__kprofile_path", Linkage::Local, false, false)
+                    .map_err(|e| CodegenError(e.to_string()))?;
+                let mut desc = DataDescription::new();
+                desc.define(path_bytes.into_boxed_slice());
+                module.define_data(path_data, &desc).map_err(|e| CodegenError(e.to_string()))?;
+                Some(ProfileState {
+                    path_data,
+                    path_len,
+                    record_id: profile_record_id,
+                    counters: HashMap::new(),
+                    entries: Vec::new(),
+                })
+            }
+            None => None,
+        };
+
         Ok(Codegen {
             module,
             fn_ids: HashMap::new(),
             printf_id,
             pmap_id,
             bounds_fail_id,
+            profile,
             str_cache: HashMap::new(),
             str_counter: 0,
             where_info: HashMap::new(),
@@ -165,6 +228,33 @@ impl Codegen {
             self.fn_ids.insert(f.name.clone(), id);
             if let Some(info) = extract_where_info(f) {
                 self.where_info.insert(f.name.clone(), info);
+            }
+            if self.profile.is_some() {
+                let counter_name = format!("__kprofile_counter_{}", f.name);
+                let counter_data = self
+                    .module
+                    .declare_data(&counter_name, Linkage::Local, true, false)
+                    .map_err(|e| CodegenError(e.to_string()))?;
+                let mut counter_desc = DataDescription::new();
+                counter_desc.define_zeroinit(8);
+                self.module
+                    .define_data(counter_data, &counter_desc)
+                    .map_err(|e| CodegenError(e.to_string()))?;
+
+                let name_bytes = f.name.as_bytes().to_vec();
+                let name_len = name_bytes.len();
+                let name_id_str = format!("__kprofile_name_{}", f.name);
+                let name_data = self
+                    .module
+                    .declare_data(&name_id_str, Linkage::Local, false, false)
+                    .map_err(|e| CodegenError(e.to_string()))?;
+                let mut name_desc = DataDescription::new();
+                name_desc.define(name_bytes.into_boxed_slice());
+                self.module.define_data(name_data, &name_desc).map_err(|e| CodegenError(e.to_string()))?;
+
+                let profile = self.profile.as_mut().expect("checked is_some above");
+                profile.counters.insert(f.name.clone(), counter_data);
+                profile.entries.push((name_data, name_len, counter_data));
             }
         }
 
@@ -229,6 +319,43 @@ impl Codegen {
                 }
             }
 
+            // Every function counts its own calls, not just `main` — a
+            // plain non-atomic load/add/store at entry, right after
+            // params are bound. Non-atomic on purpose: a call landing
+            // concurrently from a parallel_map worker thread could race
+            // and undercount by one, but this is profiling data feeding
+            // the *next* compile's inlining heuristic (see inline.rs),
+            // never something correctness depends on — worth the
+            // simplicity of skipping a real atomic RMW instruction here.
+            if let Some(profile) = &self.profile {
+                if let Some(&counter_data) = profile.counters.get(&f.name) {
+                    let local_counter = self.module.declare_data_in_func(counter_data, builder.func);
+                    let addr = builder.ins().symbol_value(types::I64, local_counter);
+                    let cur = builder.ins().load(types::I64, MemFlags::new(), addr, 0);
+                    let inc = builder.ins().iadd_imm(cur, 1);
+                    builder.ins().store(MemFlags::new(), inc, addr, 0);
+                }
+            }
+
+            // `main` compiles straight to the linked binary's C `main`
+            // (see main.rs's Linkage::Export by name) — it's the only
+            // function whose return is "the process is about to exit,"
+            // so it's the only place a profile flush can safely run
+            // exactly once regardless of which `return` statement (or
+            // none at all) actually ends the run. Every `return` inside
+            // `main` gets redirected to jump to `epilogue_blk` instead of
+            // returning directly (see FnCodegen::gen_stmt's Return arm);
+            // the flush calls are emitted there, once, right before the
+            // real `return_`.
+            let epilogue: Option<(Block, Variable)> = if f.name == "main" && self.profile.is_some() {
+                let epilogue_blk = builder.create_block();
+                let ret_var = Variable::from_u32(next_var);
+                builder.declare_var(ret_var, types::I64);
+                Some((epilogue_blk, ret_var))
+            } else {
+                None
+            };
+
             let mut fc = FnCodegen {
                 builder,
                 vars,
@@ -241,9 +368,39 @@ impl Codegen {
                 str_counter: &mut self.str_counter,
                 where_info: &self.where_info,
                 my_where: self.where_info.get(&f.name),
+                epilogue,
             };
             let terminated = fc.gen_block(&f.body)?;
-            if !terminated {
+            if let Some((epilogue_blk, ret_var)) = fc.epilogue {
+                if !terminated {
+                    let zero = fc.builder.ins().iconst(types::I64, 0);
+                    fc.builder.def_var(ret_var, zero);
+                    fc.builder.ins().jump(epilogue_blk, &[]);
+                }
+                fc.builder.switch_to_block(epilogue_blk);
+                fc.builder.seal_block(epilogue_blk);
+                if let Some(profile) = &self.profile {
+                    let local_path = fc.module.declare_data_in_func(profile.path_data, fc.builder.func);
+                    let path_ptr = fc.builder.ins().symbol_value(types::I64, local_path);
+                    let path_len_val = fc.builder.ins().iconst(types::I64, profile.path_len as i64);
+                    let local_record = fc.module.declare_func_in_func(profile.record_id, fc.builder.func);
+                    for (i, (name_data, name_len, counter_data)) in profile.entries.iter().enumerate() {
+                        let local_name = fc.module.declare_data_in_func(*name_data, fc.builder.func);
+                        let name_ptr = fc.builder.ins().symbol_value(types::I64, local_name);
+                        let name_len_val = fc.builder.ins().iconst(types::I64, *name_len as i64);
+                        let local_counter = fc.module.declare_data_in_func(*counter_data, fc.builder.func);
+                        let counter_addr = fc.builder.ins().symbol_value(types::I64, local_counter);
+                        let count_val = fc.builder.ins().load(types::I64, MemFlags::new(), counter_addr, 0);
+                        let is_first = fc.builder.ins().iconst(types::I32, if i == 0 { 1 } else { 0 });
+                        fc.builder.ins().call(
+                            local_record,
+                            &[path_ptr, path_len_val, name_ptr, name_len_val, count_val, is_first],
+                        );
+                    }
+                }
+                let ret_val = fc.builder.use_var(ret_var);
+                fc.builder.ins().return_(&[ret_val]);
+            } else if !terminated {
                 let zero = fc.builder.ins().iconst(types::I64, 0);
                 fc.builder.ins().return_(&[zero]);
             }
@@ -385,6 +542,12 @@ struct FnCodegen<'a> {
     /// `arr_param[idx_param]`) since every call site is required to
     /// prove it before the call is even allowed to compile.
     my_where: Option<&'a WhereInfo>,
+    /// `Some((block, var))` only when compiling `main` with profiling
+    /// active: every `return` jumps to `block` (having first stashed its
+    /// value in `var`) instead of returning directly, so the profile
+    /// flush calls Codegen::compile_fn emits there run exactly once no
+    /// matter which return statement actually ends the program.
+    epilogue: Option<(Block, Variable)>,
 }
 
 type CgResult<T> = Result<T, CodegenError>;
@@ -580,7 +743,12 @@ impl<'a> FnCodegen<'a> {
                     Some(e) => self.gen_expr(e)?,
                     None => self.builder.ins().iconst(types::I64, 0),
                 };
-                self.builder.ins().return_(&[v]);
+                if let Some((epilogue_blk, ret_var)) = self.epilogue {
+                    self.builder.def_var(ret_var, v);
+                    self.builder.ins().jump(epilogue_blk, &[]);
+                } else {
+                    self.builder.ins().return_(&[v]);
+                }
                 Ok(true)
             }
             Stmt::ExprStmt { expr } => {
