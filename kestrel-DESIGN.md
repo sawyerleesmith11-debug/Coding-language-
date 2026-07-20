@@ -257,15 +257,26 @@ Not yet implemented (future work, roughly in priority order):
    variable) — see `kestrelc/README.md`. Also still missing: a friendlier
    failure than a bare trap on the runtime-check fallback for genuinely
    dynamic accesses.
-2. Closing the remaining ~9% call-overhead gap in `runFast` on
+2. **Getting `kestrelc` runnable in the browser editor.** `kestrelc`
+   now has a real WASM backend (`--wasm`) — a separate code path from
+   the native one, since Cranelift only targets real CPUs — verified
+   end to end (compiles `fibonacci.kes`, runs correctly in Node's
+   `WebAssembly` API, output identical to the other two backends) and
+   fast: `fib(30)` runs in ~6.5ms, in the same ballpark as native and
+   ~64x faster than `runFast`. What's still missing: `kestrelc` itself
+   (the compiler) is a native program — to actually use this from
+   `kestrel-editor.html`, the compiler's front end needs to *also* be
+   built as a WASM module, so the browser can compile Kestrel source
+   to `.wasm` client-side. That's the next concrete step.
+3. Closing the remaining ~9% call-overhead gap in `runFast` on
    recursion-heavy code — lower priority now that `kestrelc` exists and
    already dwarfs any remaining VM-tuning gains
-3. The persistent cross-run optimization cache, built on top of `kestrelc`
-4. Layout polymorphism
-5. A more general proof system beyond simple bounds checks
-6. CPU-side parallelism for `pure` functions over collections (idea #5)
+4. The persistent cross-run optimization cache, built on top of `kestrelc`
+5. Layout polymorphism
+6. A more general proof system beyond simple bounds checks
+7. CPU-side parallelism for `pure` functions over collections (idea #5)
    — now unblocked, since `kestrelc` generates real machine code
-7. SIMD, then (much further out) a GPU backend — both extensions of (6)
+8. SIMD, then (much further out) a GPU backend — both extensions of (7)
 
 ## Naming
 

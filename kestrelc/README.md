@@ -21,8 +21,28 @@ cargo build --release
 ./fibonacci
 ```
 
-`kestrelc <file.kes>` compiles and links `<file>.kes` into a native
-executable named after the file (in the current directory), using the
+There's also a WASM backend, a completely separate code path from the
+native one below (Cranelift's codegen only targets real CPUs, not WASM —
+this uses `wasm-encoder` to build a `.wasm` module directly):
+
+```sh
+./target/release/kestrelc --wasm ../examples/fibonacci.kes   # writes fibonacci.wasm
+```
+
+The resulting `.wasm` runs in any WASM host (a browser, Node's
+`WebAssembly` API) that supplies two host-import functions the module
+calls for output, since WASM has no I/O of its own — see
+`tests/integration.rs`'s wasm tests for a minimal working host
+(`env.print_i64(value, is_last)` and `env.print_str(ptr, len, is_last)`).
+**Not yet wired into `kestrel-editor.html`** — `kestrelc` itself is
+still a native program you run from a terminal; getting this into the
+browser editor needs `kestrelc`'s *front end* also compiled to WASM (so
+the compiler runs client-side), which is a separate, not-yet-done step.
+Same scope limits as the native backend for now: no arrays.
+
+`kestrelc <file.kes>` (no `--wasm`) compiles and links `<file>.kes` into
+a native executable named after the file (in the current directory),
+using the
 system `cc` as the linker. Requires a working C toolchain (`cc`) on
 `PATH` — nothing else; Cranelift itself is a pure-Rust dependency with
 no system requirements beyond that.

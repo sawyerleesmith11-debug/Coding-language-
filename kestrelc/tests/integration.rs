@@ -390,3 +390,81 @@ fn where_clause_call_site_rejects_unprovable_dynamic_index() {
         "expected a where-clause unprovable-call-site error, got:\n{stderr}"
     );
 }
+
+#[test]
+fn wasm_backend_compiles_and_runs_fibonacci_kes_with_correct_output() {
+    // Actually instantiates and runs the compiled .wasm through Node's
+    // WebAssembly API (the same host environment the browser editor
+    // would provide) — not just checking the bytes look plausible.
+    let scratch = scratch_dir("wasm_fib");
+    let src = repo_root().join("examples").join("fibonacci.kes");
+    let out = Command::new(kestrelc_bin())
+        .arg("--wasm")
+        .arg(&src)
+        .current_dir(&scratch)
+        .output()
+        .expect("failed to run kestrelc");
+    assert!(out.status.success(), "kestrelc --wasm failed:\n{}", String::from_utf8_lossy(&out.stderr));
+
+    let wasm_path = scratch.join("fibonacci.wasm");
+    assert!(wasm_path.exists(), "expected fibonacci.wasm to be written");
+
+    let node_script = r#"
+        const fs = require("fs");
+        const bytes = fs.readFileSync(process.argv[1]);
+        const lines = []; let cur = [];
+        let instance;
+        const imports = { env: {
+            print_i64: (v, isLast) => { cur.push(v.toString()); if (isLast) { lines.push(cur.join(" ")); cur = []; } },
+            print_str: (ptr, len, isLast) => {
+                const bytes = new Uint8Array(instance.exports.memory.buffer, ptr, len);
+                cur.push(Buffer.from(bytes).toString("utf8"));
+                if (isLast) { lines.push(cur.join(" ")); cur = []; }
+            },
+        }};
+        WebAssembly.instantiate(bytes, imports).then(({ instance: inst }) => {
+            instance = inst;
+            inst.exports.main();
+            process.stdout.write(lines.join("\n") + "\n");
+        }).catch((e) => { console.error(e); process.exit(1); });
+    "#;
+    let run = Command::new("node")
+        .arg("-e")
+        .arg(node_script)
+        .arg(&wasm_path)
+        .output()
+        .expect("failed to run node (required for WASM backend tests)");
+    assert!(run.status.success(), "node failed to run the wasm module:\n{}", String::from_utf8_lossy(&run.stderr));
+
+    let expected = "\
+fib 0 = 0
+fib 1 = 1
+fib 2 = 1
+fib 3 = 2
+fib 4 = 3
+fib 5 = 5
+fib 6 = 8
+fib 7 = 13
+fib 8 = 21
+fib 9 = 34
+";
+    assert_eq!(String::from_utf8_lossy(&run.stdout), expected);
+}
+
+#[test]
+fn wasm_backend_rejects_arrays_with_a_clear_error() {
+    let scratch = scratch_dir("wasm_arrays");
+    let src = repo_root().join("examples").join("basics.kes");
+    let out = Command::new(kestrelc_bin())
+        .arg("--wasm")
+        .arg(&src)
+        .current_dir(&scratch)
+        .output()
+        .expect("failed to run kestrelc");
+    assert!(!out.status.success(), "kestrelc --wasm should have rejected array usage");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("doesn't support arrays yet"),
+        "expected the arrays-not-supported error, got:\n{stderr}"
+    );
+}
