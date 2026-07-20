@@ -649,10 +649,32 @@ impl<'a> FnWasm<'a> {
                 self.func.instructions().i32_ge_s();
                 self.func.instructions().i32_or();
                 self.func.instructions().if_(wasm_encoder::BlockType::Empty);
-                // Matches run()/runFast()'s "always check" behavior, but
-                // not (yet) their friendly error message — trapping here
-                // halts the module immediately rather than printing and
-                // exiting cleanly.
+                // Matches run()/runFast()'s "always check" behavior, and
+                // now also their friendly error message — printed through
+                // the same host imports print() uses, right before the
+                // trap that actually halts the module. `scratch` already
+                // holds the wrapped i32 index; extending it back to i64
+                // for printing avoids re-evaluating (and, if it has a
+                // function call in it, re-running) the index expression.
+                // print_i64/print_str join every segment of one "line"
+                // with a space (matching print()'s own arg-separator
+                // behavior — this reuses those same host imports), so
+                // the message strings themselves carry no leading/
+                // trailing space of their own.
+                let (msg1_off, msg1_len) = self.intern_str("kestrelc: Index");
+                self.func.instructions().i32_const(msg1_off as i32).i32_const(msg1_len as i32).i32_const(0);
+                self.func.instructions().call(IMPORT_PRINT_STR);
+                self.func.instructions().local_get(scratch);
+                self.func.instructions().i64_extend_i32_s();
+                self.func.instructions().i32_const(0);
+                self.func.instructions().call(IMPORT_PRINT_I64);
+                let (msg2_off, msg2_len) = self.intern_str("out of bounds for array of length");
+                self.func.instructions().i32_const(msg2_off as i32).i32_const(msg2_len as i32).i32_const(0);
+                self.func.instructions().call(IMPORT_PRINT_STR);
+                self.func.instructions().local_get(len);
+                self.func.instructions().i64_extend_i32_u();
+                self.func.instructions().i32_const(1);
+                self.func.instructions().call(IMPORT_PRINT_I64);
                 self.func.instructions().unreachable();
                 self.func.instructions().end();
 

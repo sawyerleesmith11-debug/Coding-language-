@@ -153,15 +153,19 @@ Codegen, however, currently supports a subset:
   provable yet and is rejected at compile time rather than silently
   falling back to a runtime check for `where`-guarded calls specifically.
   Indexing *without* a `where` clause still falls back to an ordinary
-  runtime check, same as `run`/`runFast`; a failing runtime check
-  **traps the process (`SIGILL`) immediately** rather than printing a
-  message and exiting cleanly like the other two backends do — a real,
-  known difference, not yet fixed. The WASM backend (below) now has the
-  identical scope, including eliding the check *inside* a `where`-guarded
-  function body from its call sites' proofs (both backends share one
-  `WhereInfo` analysis in `kestrelc/src/where_info.rs`); a failing
-  runtime check there traps via WASM's `unreachable` instruction instead
-  of `SIGILL`.
+  runtime check, same as `run`/`runFast`; a failing runtime check now
+  prints `kestrelc: Index N out of bounds for array of length M` before
+  halting, in both backends — the native backend calls a small runtime
+  function (`kestrelc_bounds_fail` in `runtime/kestrelc_runtime.c`)
+  that writes to stderr and exits(1) instead of a bare trap (still a
+  trap right after, purely to satisfy Cranelift's "every block needs a
+  terminator" — unreachable in practice); the WASM backend prints the
+  same message through the same host `print_i64`/`print_str` imports
+  the program's own `print()` calls use, then traps via `unreachable`.
+  The WASM backend (below) has the identical elision scope too,
+  including eliding the check *inside* a `where`-guarded function body
+  from its call sites' proofs — both backends share one `WhereInfo`
+  analysis in `kestrelc/src/where_info.rs`.
 - **`parallel_map(f, arr)`**, with real OS-thread parallelism — see
   "Parallel map" below. `f` must be a `pure fn` taking exactly one
   scalar parameter; `arr` must be a fixed-size array *literal*

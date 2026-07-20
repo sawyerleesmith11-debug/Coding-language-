@@ -30,6 +30,7 @@ pub struct Codegen {
     fn_ids: HashMap<String, FuncId>,
     printf_id: FuncId,
     pmap_id: FuncId,
+    bounds_fail_id: FuncId,
     str_cache: HashMap<String, StrConst>,
     str_counter: usize,
     where_info: HashMap<String, WhereInfo>,
@@ -106,11 +107,26 @@ impl Codegen {
             .declare_function("kestrelc_parallel_map_i64", Linkage::Import, &pmap_sig)
             .map_err(|e| CodegenError(e.to_string()))?;
 
+        // kestrelc_bounds_fail(idx: i64, len: i64) -> ! — prints a
+        // friendly message and exits, instead of the runtime bounds
+        // check just trapping (SIGILL) with no indication of what went
+        // wrong. Declared with a real (never-taken) return type since
+        // Cranelift signatures don't have a native "never returns"
+        // marker; the call site still emits a trap right after, purely
+        // to satisfy "every block needs a terminator."
+        let mut bounds_fail_sig = Signature::new(call_conv);
+        bounds_fail_sig.params.push(AbiParam::new(types::I64)); // idx
+        bounds_fail_sig.params.push(AbiParam::new(types::I64)); // len
+        let bounds_fail_id = module
+            .declare_function("kestrelc_bounds_fail", Linkage::Import, &bounds_fail_sig)
+            .map_err(|e| CodegenError(e.to_string()))?;
+
         Ok(Codegen {
             module,
             fn_ids: HashMap::new(),
             printf_id,
             pmap_id,
+            bounds_fail_id,
             str_cache: HashMap::new(),
             str_counter: 0,
             where_info: HashMap::new(),
@@ -219,6 +235,7 @@ impl Codegen {
                 fn_ids: &self.fn_ids,
                 printf_id: self.printf_id,
                 pmap_id: self.pmap_id,
+                bounds_fail_id: self.bounds_fail_id,
                 module: &mut self.module,
                 str_cache: &mut self.str_cache,
                 str_counter: &mut self.str_counter,
@@ -358,6 +375,7 @@ struct FnCodegen<'a> {
     fn_ids: &'a HashMap<String, FuncId>,
     printf_id: FuncId,
     pmap_id: FuncId,
+    bounds_fail_id: FuncId,
     module: &'a mut ObjectModule,
     str_cache: &'a mut HashMap<String, StrConst>,
     str_counter: &'a mut usize,
@@ -739,9 +757,12 @@ impl<'a> FnCodegen<'a> {
 
                 self.builder.switch_to_block(oob_blk);
                 self.builder.seal_block(oob_blk);
-                // Matches run()/runFast()'s "always check" behavior, but not
-                // (yet) their friendly error message — trapping here halts
-                // the process immediately rather than printing and exiting.
+                // Matches run()/runFast()'s "always check" behavior, and now
+                // also their friendly error message: kestrelc_bounds_fail
+                // prints it and exits before this trap would ever actually
+                // execute (Cranelift still requires a terminator here).
+                let local_bounds_fail = self.module.declare_func_in_func(self.bounds_fail_id, self.builder.func);
+                self.builder.ins().call(local_bounds_fail, &[idx, len]);
                 self.builder.ins().trap(TrapCode::unwrap_user(1));
 
                 self.builder.switch_to_block(ok_blk);

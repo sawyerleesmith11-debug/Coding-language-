@@ -169,7 +169,12 @@ fn dynamically_out_of_bounds_index_traps_at_runtime_instead_of_reading_garbage()
     let bin = scratch.join("oob_dynamic");
     let run = Command::new(&bin).output().expect("failed to run compiled binary");
     assert!(!run.status.success(), "out-of-bounds access should not exit successfully");
-    assert!(run.stdout.is_empty(), "should trap before printing anything");
+    assert!(run.stdout.is_empty(), "should trap before printing the program's own output");
+    let stderr = String::from_utf8_lossy(&run.stderr).replace("\r\n", "\n");
+    assert!(
+        stderr.contains("kestrelc: Index 5 out of bounds for array of length 3"),
+        "expected a friendly bounds-check failure message, got:\n{stderr}"
+    );
 }
 
 #[test]
@@ -539,23 +544,30 @@ fib 9 = 34
 }
 
 fn run_wasm_via_node(wasm_path: &std::path::Path) -> std::process::Output {
+    // Writes each print()'s line to stdout as soon as it completes
+    // (isLast), same as kestrel-editor.html's real host imports (see
+    // its `flush()`) — not batched until `main()` returns. That
+    // difference matters for a program that traps partway through: any
+    // output already printed before the trap is real, observable
+    // output in the actual product, and this harness needs to
+    // reproduce that to test it (e.g. the friendly out-of-bounds
+    // message a trap now prints right before it happens).
     let node_script = r#"
         const fs = require("fs");
         const bytes = fs.readFileSync(process.argv[1]);
-        const lines = []; let cur = [];
+        let cur = [];
         let instance;
         const imports = { env: {
-            print_i64: (v, isLast) => { cur.push(v.toString()); if (isLast) { lines.push(cur.join(" ")); cur = []; } },
+            print_i64: (v, isLast) => { cur.push(v.toString()); if (isLast) { process.stdout.write(cur.join(" ") + "\n"); cur = []; } },
             print_str: (ptr, len, isLast) => {
                 const bytes = new Uint8Array(instance.exports.memory.buffer, ptr, len);
                 cur.push(Buffer.from(bytes).toString("utf8"));
-                if (isLast) { lines.push(cur.join(" ")); cur = []; }
+                if (isLast) { process.stdout.write(cur.join(" ") + "\n"); cur = []; }
             },
         }};
         WebAssembly.instantiate(bytes, imports).then(({ instance: inst }) => {
             instance = inst;
             inst.exports.main();
-            process.stdout.write(lines.join("\n") + "\n");
         }).catch((e) => { console.error(e); process.exit(1); });
     "#;
     Command::new("node")
@@ -617,6 +629,15 @@ fn wasm_backend_traps_on_out_of_bounds_array_index() {
     assert!(
         stderr.contains("unreachable"),
         "expected a wasm 'unreachable' trap, got:\n{stderr}"
+    );
+    // The friendly message is printed through the same host print
+    // imports the program's own print() calls use, right before the
+    // trap — real, observable output in the actual product (see
+    // run_wasm_via_node's per-line flushing), not lost by the trap.
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(
+        stdout.contains("kestrelc: Index 5 out of bounds for array of length 3"),
+        "expected a friendly bounds-check failure message, got:\n{stdout}"
     );
 }
 

@@ -16,6 +16,7 @@
 // the same way it already calls libc's `printf`.
 
 #include <pthread.h>
+#include <stdio.h>
 #include <stdlib.h>
 #ifdef _WIN32
 #include <windows.h>
@@ -113,4 +114,20 @@ void kestrelc_parallel_map_i64(const long long* in, long long len, long long (*f
 
     free(threads);
     free(chunks);
+}
+
+// Called by kestrelc-generated code for an *unprovable* array access
+// (no `where` clause covers it, so it's checked at runtime — see
+// codegen.rs's Expr::Index arm) once the bounds check actually fails.
+// Previously this was a bare trap: the process died with SIGILL and no
+// indication of what went wrong, unlike run()/runFast(), which print a
+// message and exit cleanly. Prints the same kind of message those
+// backends do, then exits with a real error status instead of
+// crashing. Declared to never return so the one instruction generated
+// after calling it (still a trap, to satisfy Cranelift's "every block
+// needs a terminator" rule) is unreachable in practice, not a real
+// fallback path.
+void kestrelc_bounds_fail(long long idx, long long len) {
+    fprintf(stderr, "kestrelc: Index %lld out of bounds for array of length %lld\n", idx, len);
+    exit(1);
 }

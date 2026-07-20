@@ -461,8 +461,11 @@ Not yet implemented (future work, roughly in priority order):
    same proof, not two copies). Still narrow: the prover only handles a
    literal index and a literal-length array argument at the call site
    (not, say, an index derived from another proven-safe variable) — see
-   `kestrelc/README.md`. Still missing: a friendlier failure than a bare
-   trap on the runtime-check fallback for genuinely dynamic accesses.
+   `kestrelc/README.md`. The runtime-check fallback (for genuinely
+   dynamic accesses that can't be elided) now also prints a message
+   before halting — `kestrelc: Index N out of bounds for array of
+   length M` — in both backends, instead of a bare trap with no
+   indication of what went wrong.
 4. The full runtime-profile-guided version of the persistent cache (idea
    #1) — the on-disk/in-memory *compile-result* cache is done; branch/
    shape profiling and pre-specialization from it are not
