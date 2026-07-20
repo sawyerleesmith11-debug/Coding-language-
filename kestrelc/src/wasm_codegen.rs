@@ -19,6 +19,8 @@
 // long-running or allocation-heavy) — see kestrelc-web/README.md.
 
 use crate::ast::*;
+use crate::error::{ErrorKind, KestrelcError};
+use crate::span::Span;
 use crate::where_info::{extract_where_info, WhereInfo};
 use std::collections::HashMap;
 use wasm_encoder::{
@@ -26,8 +28,6 @@ use wasm_encoder::{
     GlobalSection, GlobalType, ImportSection, MemArg, MemorySection, MemoryType, Module,
     TypeSection, ValType,
 };
-
-pub struct WasmError(pub String);
 
 // Host imports every module needs: two ways for the running program to
 // report output back to whatever's embedding it (the browser, or Node
@@ -47,7 +47,7 @@ const BUMP_GLOBAL: u32 = 0;
 const ARENA_BYTES: u32 = 1 << 20; // 1 MiB
 const WASM_PAGE: u32 = 65536;
 
-pub fn compile_to_wasm(program: &Program) -> Result<Vec<u8>, WasmError> {
+pub fn compile_to_wasm(program: &Program) -> Result<Vec<u8>, KestrelcError> {
     let mut types = TypeSection::new();
     let mut imports = ImportSection::new();
     let mut functions = FunctionSection::new();
@@ -240,7 +240,7 @@ fn gen_fn(
     my_where: Option<&WhereInfo>,
     data_bytes: &mut Vec<u8>,
     str_offsets: &mut HashMap<String, (u32, u32)>,
-) -> Result<Function, WasmError> {
+) -> Result<Function, KestrelcError> {
     let slot_kinds = collect_slots(f);
 
     // Assign WASM local indices: params first (their count/types must
@@ -281,7 +281,17 @@ fn gen_fn(
     extra_locals.push((1, ValType::I32));
 
     let mut func = Function::new(extra_locals);
-    let mut fc = FnWasm { func: &mut func, vars, fn_indices, where_info, my_where, data_bytes, str_offsets, scratch };
+    let mut fc = FnWasm {
+        func: &mut func,
+        vars,
+        fn_indices,
+        where_info,
+        my_where,
+        data_bytes,
+        str_offsets,
+        scratch,
+        cur_span: f.span,
+    };
     fc.gen_block(&f.body)?;
     // Falling off the end returns 0, matching the other two backends.
     func.instructions().i64_const(0).return_();
@@ -304,11 +314,20 @@ struct FnWasm<'a> {
     data_bytes: &'a mut Vec<u8>,
     str_offsets: &'a mut HashMap<String, (u32, u32)>,
     scratch: u32,
+    /// The span of the statement `gen_stmt` is currently generating code
+    /// for — see codegen.rs's identical `cur_span` field/`err()` method
+    /// for the full rationale. Closes the gap left by native codegen
+    /// errors getting real positions and this backend's not.
+    cur_span: Span,
 }
 
-type WResult<T> = Result<T, WasmError>;
+type WResult<T> = Result<T, KestrelcError>;
 
 impl<'a> FnWasm<'a> {
+    fn err(&self, message: String) -> KestrelcError {
+        KestrelcError::new(ErrorKind::Codegen, message, self.cur_span)
+    }
+
     fn gen_block(&mut self, stmts: &[Stmt]) -> WResult<()> {
         for s in stmts {
             self.gen_stmt(s)?;
@@ -331,7 +350,7 @@ impl<'a> FnWasm<'a> {
                 let (ptr, len) = (*ptr, *len);
                 let expected = literal_len.expect("array let-bindings always have a literal_len");
                 if elems.len() as u32 != expected {
-                    return Err(WasmError(format!(
+                    return Err(self.err(format!(
                         "kestrelc: array variable '{name}' rebound with a different length ({} vs {expected}) — not supported",
                         elems.len()
                     )));
@@ -357,20 +376,20 @@ impl<'a> FnWasm<'a> {
                 let (ptr, len) = (*ptr, *len);
                 let func_name = match &args[0] {
                     Expr::Ident(n) => n.clone(),
-                    _ => return Err(WasmError(
+                    _ => return Err(self.err(
                         "parallel_map()'s first argument must be a bare function name".into(),
                     )),
                 };
                 let callee_idx = *self
                     .fn_indices
                     .get(&func_name)
-                    .ok_or_else(|| WasmError(format!("Unknown function '{func_name}'")))?;
-                let elem_count = self.static_array_len(&args[1]).ok_or_else(|| WasmError(
+                    .ok_or_else(|| self.err(format!("Unknown function '{func_name}'")))?;
+                let elem_count = self.static_array_len(&args[1]).ok_or_else(|| self.err(
                     "kestrelc's WASM backend only supports parallel_map over a fixed-size array literal (`let x = [...]`) so far, not an array parameter".into(),
                 ))?;
                 let expected = literal_len.expect("array let-bindings always have a literal_len");
                 if elem_count != expected {
-                    return Err(WasmError(format!(
+                    return Err(self.err(format!(
                         "kestrelc: array variable '{name}' rebound with a different length ({elem_count} vs {expected}) — not supported"
                     )));
                 }
@@ -433,18 +452,27 @@ impl<'a> FnWasm<'a> {
                 self.func.instructions().local_set(len);
                 Ok(())
             }
-            (VarLoc::Array { .. }, _) => Err(WasmError(format!(
+            (VarLoc::Array { .. }, _) => Err(self.err(format!(
                 "kestrelc: '{name}' is an array variable and can only be (re)bound to an array literal so far"
             ))),
         }
     }
 
     fn gen_stmt(&mut self, s: &Stmt) -> WResult<()> {
+        self.cur_span = match s {
+            Stmt::Let { span, .. }
+            | Stmt::Assign { span, .. }
+            | Stmt::If { span, .. }
+            | Stmt::While { span, .. }
+            | Stmt::Print { span, .. }
+            | Stmt::Return { span, .. }
+            | Stmt::ExprStmt { span, .. } => *span,
+        };
         match s {
             Stmt::Let { name, value, .. } => self.gen_binding(name, value),
             Stmt::Assign { name, value, .. } => {
                 if !self.vars.contains_key(name) {
-                    return Err(WasmError(format!("Assignment to unknown variable '{name}'")));
+                    return Err(self.err(format!("Assignment to unknown variable '{name}'")));
                 }
                 self.gen_binding(name, value)
             }
@@ -551,15 +579,15 @@ impl<'a> FnWasm<'a> {
         let name = match e {
             Expr::Ident(name) => name,
             _ => {
-                return Err(WasmError(
+                return Err(self.err(
                     "kestrelc only supports indexing/passing a plain array variable so far".into(),
                 ))
             }
         };
         match self.vars.get(name) {
             Some(VarLoc::Array { ptr, len, .. }) => Ok((*ptr, *len)),
-            Some(VarLoc::Scalar(_)) => Err(WasmError(format!("'{name}' is not an array"))),
-            None => Err(WasmError(format!("Unknown identifier '{name}'"))),
+            Some(VarLoc::Scalar(_)) => Err(self.err(format!("'{name}' is not an array"))),
+            None => Err(self.err(format!("Unknown identifier '{name}'"))),
         }
     }
 
@@ -573,7 +601,7 @@ impl<'a> FnWasm<'a> {
                 self.func.instructions().i64_const(if *b { 1 } else { 0 });
                 Ok(())
             }
-            Expr::Str(_) => Err(WasmError(
+            Expr::Str(_) => Err(self.err(
                 "kestrelc's WASM backend only supports string literals as direct print() arguments so far".into(),
             )),
             Expr::Ident(name) => match self.vars.get(name) {
@@ -581,12 +609,12 @@ impl<'a> FnWasm<'a> {
                     self.func.instructions().local_get(*idx);
                     Ok(())
                 }
-                Some(VarLoc::Array { .. }) => Err(WasmError(format!(
+                Some(VarLoc::Array { .. }) => Err(self.err(format!(
                     "'{name}' is an array — it can only be indexed (arr[i]) or passed to a function, not used as a value directly"
                 ))),
-                None => Err(WasmError(format!("Unknown identifier '{name}'"))),
+                None => Err(self.err(format!("Unknown identifier '{name}'"))),
             },
-            Expr::ArrayLit(_) => Err(WasmError(
+            Expr::ArrayLit(_) => Err(self.err(
                 "kestrelc only supports array literals as the direct value of a `let`/assignment so far".into(),
             )),
             Expr::Index { target, index } => {
@@ -597,7 +625,7 @@ impl<'a> FnWasm<'a> {
                 // either way.
                 if let (Expr::Num(n), Some(static_len)) = (index.as_ref(), self.static_array_len(target)) {
                     if *n < 0 || *n as u32 >= static_len {
-                        return Err(WasmError(format!(
+                        return Err(self.err(format!(
                             "index {n} is out of bounds for array of length {static_len} — proven at compile time, not deferred to a runtime check"
                         )));
                     }
@@ -725,7 +753,7 @@ impl<'a> FnWasm<'a> {
                 let idx = *self
                     .fn_indices
                     .get(name)
-                    .ok_or_else(|| WasmError(format!("Unknown function '{name}'")))?;
+                    .ok_or_else(|| self.err(format!("Unknown function '{name}'")))?;
 
                 // If the callee has a recognized `where idx < N` clause,
                 // its precondition must be proven right here, at compile
@@ -741,19 +769,19 @@ impl<'a> FnWasm<'a> {
                     let idx_lit = match idx_arg {
                         Expr::Num(n) => *n,
                         _ => {
-                            return Err(WasmError(format!(
+                            return Err(self.err(format!(
                                 "kestrelc: can't prove '{name}''s `where {} < ...` clause here — the index argument must be a literal number so far",
                                 w.idx_param
                             )))
                         }
                     };
                     let arr_len = self.static_array_len(arr_arg).ok_or_else(|| {
-                        WasmError(format!(
+                        self.err(format!(
                             "kestrelc: can't prove '{name}''s where clause here — the array argument must be a fixed-size array literal (`let x = [...]`) so far, not a parameter passed further down"
                         ))
                     })?;
                     if idx_lit < 0 || idx_lit as u32 >= arr_len {
-                        return Err(WasmError(format!(
+                        return Err(self.err(format!(
                             "kestrelc: call to '{name}' can't satisfy its own `where {} < N` clause — index {idx_lit} is out of bounds for an array of length {arr_len}",
                             w.idx_param
                         )));

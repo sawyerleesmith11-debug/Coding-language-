@@ -1,8 +1,37 @@
+use kestrelc::error::KestrelcError;
 use kestrelc::{cache, codegen, format_diagnostic, fusion, inline, lexer, parser, profile, purity, typecheck, wasm_codegen};
 
 use std::fs;
 use std::path::Path;
 use std::process::{Command, ExitCode};
+
+/// Prints one error, `format_diagnostic`'s full `file:line:col:` + caret
+/// treatment when it has a real position, or just the bare message when
+/// it doesn't (see `KestrelcError::internal` — a zero span means "an
+/// internal compiler-level failure, not something in your source").
+fn report_one(src: &str, path: &str, e: &KestrelcError) {
+    if e.span.line == 0 {
+        eprintln!("kestrelc: {}", e.message);
+    } else {
+        eprintln!("kestrelc: {}", format_diagnostic(src, path, e.span.line, e.span.col, e.span.len.max(1), &e.message));
+    }
+}
+
+/// Prints a header line (from `e.kind`, shared across every error in
+/// `errors` — a checker only ever reports its own kind) followed by
+/// every error, indented, through `report_one`'s same formatting.
+fn report_many(src: &str, path: &str, errors: &[KestrelcError]) {
+    if let Some(first) = errors.first() {
+        eprintln!("kestrelc: {}:", first.kind.label());
+    }
+    for e in errors {
+        if e.span.line == 0 {
+            eprintln!("  {}", e.message);
+        } else {
+            eprintln!("  {}", format_diagnostic(src, path, e.span.line, e.span.col, e.span.len.max(1), &e.message));
+        }
+    }
+}
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
@@ -61,7 +90,7 @@ fn main() -> ExitCode {
     let tokens = match lexer::lex(&src) {
         Ok(t) => t,
         Err(e) => {
-            eprintln!("kestrelc: {}", format_diagnostic(&src, &path, e.span.line, e.span.col, e.span.len, &e.message));
+            report_one(&src, &path, &e);
             return ExitCode::FAILURE;
         }
     };
@@ -69,35 +98,26 @@ fn main() -> ExitCode {
     let program = match parser::parse(tokens) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("kestrelc: {}", format_diagnostic(&src, &path, e.span.line, e.span.col, e.span.len, &e.message));
+            report_one(&src, &path, &e);
             return ExitCode::FAILURE;
         }
     };
 
     let purity_errors = purity::check_purity(&program);
     if !purity_errors.is_empty() {
-        eprintln!("kestrelc: Purity check failed:");
-        for e in &purity_errors {
-            eprintln!("  {}", format_diagnostic(&src, &path, e.span.line, e.span.col, 1, &e.message));
-        }
+        report_many(&src, &path, &purity_errors);
         return ExitCode::FAILURE;
     }
 
     let pmap_errors = purity::check_parallel_map(&program);
     if !pmap_errors.is_empty() {
-        eprintln!("kestrelc: parallel_map() check failed:");
-        for e in &pmap_errors {
-            eprintln!("  {}", format_diagnostic(&src, &path, e.span.line, e.span.col, 1, &e.message));
-        }
+        report_many(&src, &path, &pmap_errors);
         return ExitCode::FAILURE;
     }
 
     let type_errors = typecheck::check_types(&program);
     if !type_errors.is_empty() {
-        eprintln!("kestrelc: Type check failed:");
-        for e in &type_errors {
-            eprintln!("  {}", format_diagnostic(&src, &path, e.span.line, e.span.col, 1, &e.message));
-        }
+        report_many(&src, &path, &type_errors);
         return ExitCode::FAILURE;
     }
 
@@ -112,7 +132,7 @@ fn main() -> ExitCode {
         let bytes = match wasm_codegen::compile_to_wasm(&program) {
             Ok(b) => b,
             Err(e) => {
-                eprintln!("kestrelc: {}", e.0);
+                report_one(&src, &path, &e);
                 return ExitCode::FAILURE;
             }
         };
@@ -139,12 +159,12 @@ fn main() -> ExitCode {
     let mut cg = match codegen::Codegen::new(profile_path) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("kestrelc: {}", e.0);
+            report_one(&src, &path, &e);
             return ExitCode::FAILURE;
         }
     };
     if let Err(e) = cg.compile_program(&program) {
-        eprintln!("kestrelc: {}", e.0);
+        report_one(&src, &path, &e);
         return ExitCode::FAILURE;
     }
     let object_bytes = cg.finish();

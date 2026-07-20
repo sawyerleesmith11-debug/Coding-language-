@@ -16,6 +16,7 @@
 // same wording.
 
 use crate::ast::*;
+use crate::error::{ErrorKind, KestrelcError};
 use crate::span::Span;
 use std::collections::HashMap;
 
@@ -40,7 +41,7 @@ impl Kind {
     }
 }
 
-pub fn check_types(program: &Program) -> Vec<CheckError> {
+pub fn check_types(program: &Program) -> Vec<KestrelcError> {
     let fns: HashMap<&str, &Fn> = program.iter().map(|f| (f.name.as_str(), f)).collect();
     let mut errors = Vec::new();
 
@@ -77,10 +78,10 @@ pub fn check_types(program: &Program) -> Vec<CheckError> {
         locals: &HashMap<String, Kind>,
         fns: &HashMap<&str, &Fn>,
         span: Span,
-        errors: &mut Vec<CheckError>,
+        errors: &mut Vec<KestrelcError>,
     ) -> Kind {
-        let push = |errors: &mut Vec<CheckError>, message: String| {
-            errors.push(CheckError { message, span });
+        let push = |errors: &mut Vec<KestrelcError>, message: String| {
+            errors.push(KestrelcError::new(ErrorKind::Type, message, span));
         };
         match e {
             Expr::Num(_) => Kind::Int,
@@ -175,7 +176,7 @@ pub fn check_types(program: &Program) -> Vec<CheckError> {
         }
     }
 
-    fn visit_stmt(s: &Stmt, locals: &mut HashMap<String, Kind>, fns: &HashMap<&str, &Fn>, errors: &mut Vec<CheckError>) {
+    fn visit_stmt(s: &Stmt, locals: &mut HashMap<String, Kind>, fns: &HashMap<&str, &Fn>, errors: &mut Vec<KestrelcError>) {
         match s {
             Stmt::Let { name, value, span } => {
                 let k = infer_expr(value, locals, fns, *span, errors);
@@ -185,24 +186,26 @@ pub fn check_types(program: &Program) -> Vec<CheckError> {
                 let k = infer_expr(value, locals, fns, *span, errors);
                 if let Some(&prior) = locals.get(name) {
                     if prior != Kind::Unknown && k != Kind::Unknown && prior != k {
-                        errors.push(CheckError {
-                            message: format!(
+                        errors.push(KestrelcError::new(
+                            ErrorKind::Type,
+                            format!(
                                 "'{name}' was first bound as {}, can't assign {} to it",
                                 prior.name(),
                                 k.name()
                             ),
-                            span: *span,
-                        });
+                            *span,
+                        ));
                     }
                 }
             }
             Stmt::If { cond, then_block, else_block, span } => {
                 let k = infer_expr(cond, locals, fns, *span, errors);
                 if k != Kind::Unknown && k != Kind::Bool {
-                    errors.push(CheckError {
-                        message: format!("if-condition must be a boolean expression, found {}", k.name()),
-                        span: *span,
-                    });
+                    errors.push(KestrelcError::new(
+                        ErrorKind::Type,
+                        format!("if-condition must be a boolean expression, found {}", k.name()),
+                        *span,
+                    ));
                 }
                 for st in then_block {
                     visit_stmt(st, locals, fns, errors);
@@ -216,10 +219,11 @@ pub fn check_types(program: &Program) -> Vec<CheckError> {
             Stmt::While { cond, body, span } => {
                 let k = infer_expr(cond, locals, fns, *span, errors);
                 if k != Kind::Unknown && k != Kind::Bool {
-                    errors.push(CheckError {
-                        message: format!("while-condition must be a boolean expression, found {}", k.name()),
-                        span: *span,
-                    });
+                    errors.push(KestrelcError::new(
+                        ErrorKind::Type,
+                        format!("while-condition must be a boolean expression, found {}", k.name()),
+                        *span,
+                    ));
                 }
                 for st in body {
                     visit_stmt(st, locals, fns, errors);
@@ -248,7 +252,7 @@ pub fn check_types(program: &Program) -> Vec<CheckError> {
             visit_stmt(s, &mut locals, &fns, &mut fn_errors);
         }
         for e in fn_errors {
-            errors.push(CheckError { message: format!("in '{}': {}", fn_.name, e.message), span: e.span });
+            errors.push(KestrelcError::new(e.kind, format!("in '{}': {}", fn_.name, e.message), e.span));
         }
     }
     errors

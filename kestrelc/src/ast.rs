@@ -71,18 +71,6 @@ pub enum Stmt {
     ExprStmt { expr: Expr, span: Span },
 }
 
-/// A checker-reported error (purity, `parallel_map` misuse, type
-/// mismatch) with a real source position — the statement it was found
-/// in, not the exact sub-expression (see the Stmt doc comment above).
-/// Shared by purity.rs and typecheck.rs so main.rs / lib.rs can format
-/// every checker's errors the same way lex/parse errors already are
-/// (see format_diagnostic).
-#[derive(Debug, Clone)]
-pub struct CheckError {
-    pub message: String,
-    pub span: Span,
-}
-
 #[derive(Debug, Clone)]
 pub struct Fn {
     pub name: String,

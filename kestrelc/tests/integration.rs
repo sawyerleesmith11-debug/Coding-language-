@@ -1423,13 +1423,16 @@ fn a_function_used_as_a_parallel_map_callback_is_never_memoized_and_still_runs_c
 // ==================== codegen error positions ====================
 
 #[test]
-fn a_codegen_error_now_carries_a_line_col_prefix_not_just_a_bare_message() {
+fn a_native_codegen_error_now_carries_a_full_caret_diagnostic() {
     // Purity/parallel_map/type-check errors already got real
     // file:line:col: + caret diagnostics (see the earlier caret tests
-    // above) — this is the next stage, codegen.rs's own errors, which
-    // used to be message-only. No source text is threaded into
-    // codegen.rs, so this is a bare `line:col:` prefix, not a full
-    // caret rendering — see FnCodegen::err's doc comment.
+    // above) — codegen.rs's own errors, and wasm_codegen.rs's (see the
+    // wasm-backend counterpart below), used to be message-only, then
+    // just a bare `line:col:` prefix. Unifying every error type behind
+    // one KestrelcError{kind,message,span} (see error.rs) meant codegen
+    // errors inherited a real Span (with a real len, from Stmt) for
+    // free, so main.rs can render the exact same full caret treatment
+    // for these as everything else.
     let scratch = scratch_dir("codegen_err_pos");
     let src_path = scratch.join("prog.kes");
     fs::write(
@@ -1449,7 +1452,38 @@ fn a_codegen_error_now_carries_a_line_col_prefix_not_just_a_bare_message() {
     assert!(!out.status.success(), "kestrelc should reject using an array value directly");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("3:5:") && stderr.contains("it can only be indexed"),
-        "expected a '3:5:' position prefix on the codegen error, got:\n{stderr}"
+        stderr.contains("prog.kes:3:5:") && stderr.contains("it can only be indexed") && stderr.contains('^'),
+        "expected a full file:line:col: + caret diagnostic on the codegen error, got:\n{stderr}"
+    );
+}
+
+#[test]
+fn a_wasm_codegen_error_also_now_carries_a_full_caret_diagnostic() {
+    // Same program, same error, through the WASM backend instead — this
+    // used to be entirely message-only (a documented remaining gap after
+    // the native backend got its line:col: prefix); unifying error types
+    // closed that gap for both backends at once, not just native.
+    let scratch = scratch_dir("wasm_codegen_err_pos");
+    let src_path = scratch.join("prog.kes");
+    fs::write(
+        &src_path,
+        "fn main() {\n\
+         \x20   let a = [1, 2, 3];\n\
+         \x20   print(a);\n\
+         }\n",
+    )
+    .unwrap();
+
+    let out = Command::new(kestrelc_bin())
+        .arg("--wasm")
+        .arg(&src_path)
+        .current_dir(&scratch)
+        .output()
+        .expect("failed to run kestrelc");
+    assert!(!out.status.success(), "kestrelc --wasm should reject using an array value directly");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("prog.kes:3:5:") && stderr.contains("it can only be indexed") && stderr.contains('^'),
+        "expected a full file:line:col: + caret diagnostic on the wasm codegen error, got:\n{stderr}"
     );
 }

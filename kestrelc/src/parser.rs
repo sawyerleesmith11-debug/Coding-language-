@@ -2,21 +2,15 @@
 // climbing structure. See docs/SYNTAX.md.
 
 use crate::ast::*;
+use crate::error::{ErrorKind, KestrelcError};
 use crate::lexer::{Tok, Token};
-use crate::span::Span;
-
-#[derive(Debug)]
-pub struct ParseError {
-    pub message: String,
-    pub span: Span,
-}
 
 pub struct Parser {
     tokens: Vec<Token>,
     pos: usize,
 }
 
-type PResult<T> = Result<T, ParseError>;
+type PResult<T> = Result<T, KestrelcError>;
 
 impl Parser {
     pub fn new(tokens: Vec<Token>) -> Self {
@@ -43,10 +37,11 @@ impl Parser {
         if self.at(&tok) {
             Ok(self.advance())
         } else {
-            Err(ParseError {
-                message: format!("Expected '{:?}' but found '{:?}'", tok, self.peek().tok),
-                span: self.peek().span,
-            })
+            Err(KestrelcError::new(
+                ErrorKind::Parse,
+                format!("Expected '{:?}' but found '{:?}'", tok, self.peek().tok),
+                self.peek().span,
+            ))
         }
     }
 
@@ -57,10 +52,11 @@ impl Parser {
                 self.advance();
                 Ok(s)
             }
-            other => Err(ParseError {
-                message: format!("Expected identifier but found '{:?}'", other),
-                span: self.peek().span,
-            }),
+            other => Err(KestrelcError::new(
+                ErrorKind::Parse,
+                format!("Expected identifier but found '{:?}'", other),
+                self.peek().span,
+            )),
         }
     }
 
@@ -162,10 +158,11 @@ impl Parser {
                 self.advance();
                 Ok(Expr::Ident(name))
             }
-            other => Err(ParseError {
-                message: format!("Unexpected token '{:?}'", other),
-                span: t.span,
-            }),
+            other => Err(KestrelcError::new(
+                ErrorKind::Parse,
+                format!("Unexpected token '{:?}'", other),
+                t.span,
+            )),
         }
     }
 

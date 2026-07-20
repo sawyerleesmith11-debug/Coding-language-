@@ -6,6 +6,8 @@
 // clear compile error, not a silent miscompile.
 
 use crate::ast::*;
+use crate::error::{ErrorKind, KestrelcError};
+use crate::span::Span;
 use crate::where_info::{extract_where_info, WhereInfo};
 use cranelift_codegen::ir::{
     condcodes::IntCC, types, AbiParam, Block, Function, InstBuilder, MemFlags, Signature, StackSlotData,
@@ -18,8 +20,6 @@ use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_module::{DataDescription, DataId, FuncId, Linkage, Module};
 use cranelift_object::{ObjectBuilder, ObjectModule};
 use std::collections::HashMap;
-
-pub struct CodegenError(pub String);
 
 struct StrConst {
     data_id: DataId,
@@ -95,10 +95,10 @@ impl Codegen {
     /// directory is available (see cache::dir() / profile::profile_path)
     /// — `None` means "don't instrument at all," same optional-caching
     /// posture as everywhere else this cache touches codegen.
-    pub fn new(profile_path: Option<String>) -> Result<Self, CodegenError> {
+    pub fn new(profile_path: Option<String>) -> Result<Self, KestrelcError> {
         let mut flag_builder = settings::builder();
-        flag_builder.set("is_pic", "true").map_err(|e| CodegenError(e.to_string()))?;
-        flag_builder.set("opt_level", "speed").map_err(|e| CodegenError(e.to_string()))?;
+        flag_builder.set("is_pic", "true").map_err(|e| KestrelcError::internal(ErrorKind::Codegen, e.to_string()))?;
+        flag_builder.set("opt_level", "speed").map_err(|e| KestrelcError::internal(ErrorKind::Codegen, e.to_string()))?;
         // Array literals are stack-allocated (see compile_expr's ArrayLit
         // case) with no upper size limit — a large one (e.g. a
         // several-thousand-element literal) can blow well past a single
@@ -111,12 +111,12 @@ impl Codegen {
         // `inline` keeps the probe as plain generated instructions instead
         // of a call to an external `__probestack` symbol we'd otherwise
         // have to provide ourselves.
-        flag_builder.set("enable_probestack", "true").map_err(|e| CodegenError(e.to_string()))?;
-        flag_builder.set("probestack_strategy", "inline").map_err(|e| CodegenError(e.to_string()))?;
-        let isa_builder = cranelift_native::builder().map_err(|e| CodegenError(e.to_string()))?;
+        flag_builder.set("enable_probestack", "true").map_err(|e| KestrelcError::internal(ErrorKind::Codegen, e.to_string()))?;
+        flag_builder.set("probestack_strategy", "inline").map_err(|e| KestrelcError::internal(ErrorKind::Codegen, e.to_string()))?;
+        let isa_builder = cranelift_native::builder().map_err(|e| KestrelcError::internal(ErrorKind::Codegen, e.to_string()))?;
         let isa = isa_builder
             .finish(settings::Flags::new(flag_builder))
-            .map_err(|e| CodegenError(e.to_string()))?;
+            .map_err(|e| KestrelcError::internal(ErrorKind::Codegen, e.to_string()))?;
         let call_conv = isa.default_call_conv();
 
         let obj_builder = ObjectBuilder::new(
@@ -124,7 +124,7 @@ impl Codegen {
             "kestrel_module",
             cranelift_module::default_libcall_names(),
         )
-        .map_err(|e| CodegenError(e.to_string()))?;
+        .map_err(|e| KestrelcError::internal(ErrorKind::Codegen, e.to_string()))?;
         let mut module = ObjectModule::new(obj_builder);
 
         // printf(fmt: i64 ptr, arg: i64) -> i32 — declared with a fixed,
@@ -139,7 +139,7 @@ impl Codegen {
         printf_sig.returns.push(AbiParam::new(types::I32));
         let printf_id = module
             .declare_function("printf", Linkage::Import, &printf_sig)
-            .map_err(|e| CodegenError(e.to_string()))?;
+            .map_err(|e| KestrelcError::internal(ErrorKind::Codegen, e.to_string()))?;
 
         // kestrelc_parallel_map_i64(in: i64 ptr, len: i64, f: i64 fn ptr,
         // out: i64 ptr) -> () — the real thread-parallel implementation of
@@ -155,7 +155,7 @@ impl Codegen {
         pmap_sig.params.push(AbiParam::new(types::I64)); // out ptr
         let pmap_id = module
             .declare_function("kestrelc_parallel_map_i64", Linkage::Import, &pmap_sig)
-            .map_err(|e| CodegenError(e.to_string()))?;
+            .map_err(|e| KestrelcError::internal(ErrorKind::Codegen, e.to_string()))?;
 
         // kestrelc_bounds_fail(idx: i64, len: i64) -> ! — prints a
         // friendly message and exits, instead of the runtime bounds
@@ -169,7 +169,7 @@ impl Codegen {
         bounds_fail_sig.params.push(AbiParam::new(types::I64)); // len
         let bounds_fail_id = module
             .declare_function("kestrelc_bounds_fail", Linkage::Import, &bounds_fail_sig)
-            .map_err(|e| CodegenError(e.to_string()))?;
+            .map_err(|e| KestrelcError::internal(ErrorKind::Codegen, e.to_string()))?;
 
         // kestrelc_profile_record(path: i64 ptr, path_len: i64, name: i64
         // ptr, name_len: i64, count: i64, is_first: i32) -> () — declared
@@ -186,7 +186,7 @@ impl Codegen {
         profile_record_sig.params.push(AbiParam::new(types::I32)); // is_first
         let profile_record_id = module
             .declare_function("kestrelc_profile_record", Linkage::Import, &profile_record_sig)
-            .map_err(|e| CodegenError(e.to_string()))?;
+            .map_err(|e| KestrelcError::internal(ErrorKind::Codegen, e.to_string()))?;
 
         // kestrelc_memo_lookup(slot: i32, args: i64 ptr, nargs: i32, out:
         // i64 ptr) -> i32 (hit) and kestrelc_memo_store(slot: i32, args:
@@ -202,7 +202,7 @@ impl Codegen {
         memo_lookup_sig.returns.push(AbiParam::new(types::I32)); // hit
         let memo_lookup_id = module
             .declare_function("kestrelc_memo_lookup", Linkage::Import, &memo_lookup_sig)
-            .map_err(|e| CodegenError(e.to_string()))?;
+            .map_err(|e| KestrelcError::internal(ErrorKind::Codegen, e.to_string()))?;
 
         let mut memo_store_sig = Signature::new(call_conv);
         memo_store_sig.params.push(AbiParam::new(types::I32)); // slot
@@ -211,7 +211,7 @@ impl Codegen {
         memo_store_sig.params.push(AbiParam::new(types::I64)); // result
         let memo_store_id = module
             .declare_function("kestrelc_memo_store", Linkage::Import, &memo_store_sig)
-            .map_err(|e| CodegenError(e.to_string()))?;
+            .map_err(|e| KestrelcError::internal(ErrorKind::Codegen, e.to_string()))?;
 
         let profile = match profile_path {
             Some(path) => {
@@ -219,10 +219,10 @@ impl Codegen {
                 let path_len = path_bytes.len();
                 let path_data = module
                     .declare_data("__kprofile_path", Linkage::Local, false, false)
-                    .map_err(|e| CodegenError(e.to_string()))?;
+                    .map_err(|e| KestrelcError::internal(ErrorKind::Codegen, e.to_string()))?;
                 let mut desc = DataDescription::new();
                 desc.define(path_bytes.into_boxed_slice());
-                module.define_data(path_data, &desc).map_err(|e| CodegenError(e.to_string()))?;
+                module.define_data(path_data, &desc).map_err(|e| KestrelcError::internal(ErrorKind::Codegen, e.to_string()))?;
                 Some(ProfileState {
                     path_data,
                     path_len,
@@ -267,7 +267,7 @@ impl Codegen {
         sig
     }
 
-    pub fn compile_program(&mut self, program: &Program) -> Result<(), CodegenError> {
+    pub fn compile_program(&mut self, program: &Program) -> Result<(), KestrelcError> {
         let pmap_callbacks = crate::inline::collect_parallel_map_callbacks(program);
         let mut next_memo_slot: i32 = 0;
 
@@ -290,7 +290,7 @@ impl Codegen {
             let id = self
                 .module
                 .declare_function(&f.name, Linkage::Export, &sig)
-                .map_err(|e| CodegenError(e.to_string()))?;
+                .map_err(|e| KestrelcError::internal(ErrorKind::Codegen, e.to_string()))?;
             self.fn_ids.insert(f.name.clone(), id);
             if let Some(info) = extract_where_info(f) {
                 self.where_info.insert(f.name.clone(), info);
@@ -300,12 +300,12 @@ impl Codegen {
                 let counter_data = self
                     .module
                     .declare_data(&counter_name, Linkage::Local, true, false)
-                    .map_err(|e| CodegenError(e.to_string()))?;
+                    .map_err(|e| KestrelcError::internal(ErrorKind::Codegen, e.to_string()))?;
                 let mut counter_desc = DataDescription::new();
                 counter_desc.define_zeroinit(8);
                 self.module
                     .define_data(counter_data, &counter_desc)
-                    .map_err(|e| CodegenError(e.to_string()))?;
+                    .map_err(|e| KestrelcError::internal(ErrorKind::Codegen, e.to_string()))?;
 
                 let name_bytes = f.name.as_bytes().to_vec();
                 let name_len = name_bytes.len();
@@ -313,10 +313,10 @@ impl Codegen {
                 let name_data = self
                     .module
                     .declare_data(&name_id_str, Linkage::Local, false, false)
-                    .map_err(|e| CodegenError(e.to_string()))?;
+                    .map_err(|e| KestrelcError::internal(ErrorKind::Codegen, e.to_string()))?;
                 let mut name_desc = DataDescription::new();
                 name_desc.define(name_bytes.into_boxed_slice());
-                self.module.define_data(name_data, &name_desc).map_err(|e| CodegenError(e.to_string()))?;
+                self.module.define_data(name_data, &name_desc).map_err(|e| KestrelcError::internal(ErrorKind::Codegen, e.to_string()))?;
 
                 let profile = self.profile.as_mut().expect("checked is_some above");
                 profile.counters.insert(f.name.clone(), counter_data);
@@ -331,7 +331,7 @@ impl Codegen {
         Ok(())
     }
 
-    fn compile_fn(&mut self, f: &Fn) -> Result<(), CodegenError> {
+    fn compile_fn(&mut self, f: &Fn) -> Result<(), KestrelcError> {
         let func_id = self.fn_ids[&f.name];
         let sig = Self::fn_signature(f, self.call_conv);
 
@@ -485,7 +485,7 @@ impl Codegen {
                 where_info: &self.where_info,
                 my_where: self.where_info.get(&f.name),
                 epilogue,
-                cur_pos: (f.span.line, f.span.col),
+                cur_span: f.span,
             };
             let terminated = fc.gen_block(&f.body)?;
             if let Some((epilogue_blk, ret_var)) = fc.epilogue {
@@ -540,11 +540,11 @@ impl Codegen {
         }
 
         cranelift_codegen::verifier::verify_function(&ctx.func, self.module.isa())
-            .map_err(|e| CodegenError(format!("kestrelc codegen bug in '{}': {e}", f.name)))?;
+            .map_err(|e| KestrelcError::internal(ErrorKind::Codegen, format!("kestrelc codegen bug in '{}': {e}", f.name)))?;
 
         self.module
             .define_function(func_id, &mut ctx)
-            .map_err(|e| CodegenError(format!("failed to define '{}': {e}", f.name)))?;
+            .map_err(|e| KestrelcError::internal(ErrorKind::Codegen, format!("failed to define '{}': {e}", f.name)))?;
 
         Ok(())
     }
@@ -680,28 +680,26 @@ struct FnCodegen<'a> {
     /// flush calls Codegen::compile_fn emits there run exactly once no
     /// matter which return statement actually ends the program.
     epilogue: Option<(Block, Variable)>,
-    /// The line/col of the statement `gen_stmt` is currently generating
-    /// code for — updated at the top of every `gen_stmt` call (see
-    /// there), read by `err()` below. Same statement-granularity
-    /// tradeoff as purity.rs/typecheck.rs's `CheckError`: a codegen
-    /// error anywhere inside one statement's expression tree points at
-    /// that whole statement, not the exact sub-expression.
-    cur_pos: (usize, usize),
+    /// The span of the statement `gen_stmt` is currently generating code
+    /// for — updated at the top of every `gen_stmt` call (see there),
+    /// read by `err()` below. Same statement-granularity tradeoff as
+    /// purity.rs/typecheck.rs's checker errors: a codegen error anywhere
+    /// inside one statement's expression tree points at that whole
+    /// statement, not the exact sub-expression.
+    cur_span: Span,
 }
 
-type CgResult<T> = Result<T, CodegenError>;
+type CgResult<T> = Result<T, KestrelcError>;
 
 impl<'a> FnCodegen<'a> {
-    /// Builds a `CodegenError` prefixed with `cur_pos` — the small,
-    /// bare `line:col:` version of the diagnostics purity.rs/typecheck.rs
-    /// already get through `format_diagnostic` (see ast.rs's
-    /// `CheckError`), not the fuller `file:line:col:` + caret rendering:
-    /// `codegen.rs` never has the original source text or filename
-    /// threaded through it, only line/col numbers, so a real caret line
-    /// isn't buildable here without a larger plumbing change. Still a
-    /// real improvement over a bare message with no position at all.
-    fn err(&self, message: String) -> CodegenError {
-        CodegenError(format!("{}:{}: {message}", self.cur_pos.0, self.cur_pos.1))
+    /// Builds a `KestrelcError` positioned at `cur_span` — a real span
+    /// now (not just a bare line/col prefix), since `Stmt` carries a
+    /// full `Span` (including `len`) already; main.rs renders it through
+    /// the same `format_diagnostic` caret treatment lex/parse/checker
+    /// errors get, closing what used to be a smaller "line:col: only"
+    /// gap for native codegen errors.
+    fn err(&self, message: String) -> KestrelcError {
+        KestrelcError::new(ErrorKind::Codegen, message, self.cur_span)
     }
 }
 
@@ -815,14 +813,14 @@ impl<'a> FnCodegen<'a> {
     }
 
     fn gen_stmt(&mut self, s: &Stmt) -> CgResult<bool> {
-        self.cur_pos = match s {
+        self.cur_span = match s {
             Stmt::Let { span, .. }
             | Stmt::Assign { span, .. }
             | Stmt::If { span, .. }
             | Stmt::While { span, .. }
             | Stmt::Print { span, .. }
             | Stmt::Return { span, .. }
-            | Stmt::ExprStmt { span, .. } => (span.line, span.col),
+            | Stmt::ExprStmt { span, .. } => *span,
         };
         match s {
             Stmt::Let { name, value, .. } => {
@@ -954,14 +952,14 @@ impl<'a> FnCodegen<'a> {
         let data_id = self
             .module
             .declare_data(&name, Linkage::Local, false, false)
-            .map_err(|e| CodegenError(e.to_string()))?;
+            .map_err(|e| KestrelcError::internal(ErrorKind::Codegen, e.to_string()))?;
         let mut desc = DataDescription::new();
         let mut bytes = s.as_bytes().to_vec();
         bytes.push(0);
         desc.define(bytes.into_boxed_slice());
         self.module
             .define_data(data_id, &desc)
-            .map_err(|e| CodegenError(e.to_string()))?;
+            .map_err(|e| KestrelcError::internal(ErrorKind::Codegen, e.to_string()))?;
         self.str_cache.insert(s.to_string(), StrConst { data_id });
         Ok(data_id)
     }

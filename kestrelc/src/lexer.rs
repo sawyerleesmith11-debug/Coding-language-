@@ -1,6 +1,7 @@
 // Direct port of kestrel.js's lex() — same token set, same rules.
 // See docs/SYNTAX.md for the grammar this implements.
 
+use crate::error::{ErrorKind, KestrelcError};
 use crate::span::Span;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -54,13 +55,7 @@ pub struct Token {
     pub span: Span,
 }
 
-#[derive(Debug)]
-pub struct LexError {
-    pub message: String,
-    pub span: Span,
-}
-
-pub fn lex(src: &str) -> Result<Vec<Token>, LexError> {
+pub fn lex(src: &str) -> Result<Vec<Token>, KestrelcError> {
     let chars: Vec<char> = src.chars().collect();
     let mut i = 0usize;
     let mut line = 1usize;
@@ -100,10 +95,11 @@ pub fn lex(src: &str) -> Result<Vec<Token>, LexError> {
             }
             let text: String = chars[start..i].iter().collect();
             // kestrelc supports integers only for now (see kestrelc/README.md).
-            let value: i64 = text.parse().map_err(|_| LexError {
-                message: format!("kestrelc only supports integer literals so far, found '{text}'"),
-                span: Span::new(start_line, start_col, i - start),
-            })?;
+            let value: i64 = text.parse().map_err(|_| KestrelcError::new(
+                ErrorKind::Lex,
+                format!("kestrelc only supports integer literals so far, found '{text}'"),
+                Span::new(start_line, start_col, i - start),
+            ))?;
             tokens.push(Token { tok: Tok::Number(value), span: Span::new(start_line, start_col, i - start) });
             continue;
         }
@@ -195,10 +191,11 @@ pub fn lex(src: &str) -> Result<Vec<Token>, LexError> {
                 tokens.push(Token { tok: t, span: Span::new(start_line, start_col, 1) });
             }
             None => {
-                return Err(LexError {
-                    message: format!("Unexpected character '{c}'"),
-                    span: Span::new(start_line, start_col, 1),
-                });
+                return Err(KestrelcError::new(
+                    ErrorKind::Lex,
+                    format!("Unexpected character '{c}'"),
+                    Span::new(start_line, start_col, 1),
+                ));
             }
         }
     }

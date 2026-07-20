@@ -1,4 +1,5 @@
 pub mod ast;
+pub mod error;
 pub mod fusion;
 pub mod lexer;
 pub mod parser;
@@ -85,7 +86,13 @@ pub fn compile_to_wasm_bytes(src: &str) -> Result<Vec<u8>, String> {
     }
 
     let program = fusion::fuse_loops(&program);
-    wasm_codegen::compile_to_wasm(&program).map_err(|e| e.0)
+    wasm_codegen::compile_to_wasm(&program).map_err(|e| {
+        if e.span.line == 0 {
+            e.message
+        } else {
+            format_diagnostic(src, "<input>", e.span.line, e.span.col, e.span.len.max(1), &e.message)
+        }
+    })
 }
 
 #[cfg(test)]

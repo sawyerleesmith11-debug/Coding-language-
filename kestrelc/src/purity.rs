@@ -1,13 +1,14 @@
 // Direct port of kestrel.js's checkPurity() — same rules, same
-// recursion-safe traversal, same error wording. Returns CheckError
+// recursion-safe traversal, same error wording. Returns KestrelcError
 // (message + source position) rather than a bare String — see
-// ast.rs's CheckError doc comment for the statement-granularity scope.
+// error.rs's doc comment for the statement-granularity scope.
 
 use crate::ast::*;
+use crate::error::{ErrorKind, KestrelcError};
 use crate::span::Span;
 use std::collections::{HashMap, HashSet};
 
-pub fn check_purity(program: &Program) -> Vec<CheckError> {
+pub fn check_purity(program: &Program) -> Vec<KestrelcError> {
     let fns: HashMap<&str, &Fn> = program.iter().map(|f| (f.name.as_str(), f)).collect();
     let mut impure_cache: HashMap<String, bool> = HashMap::new();
 
@@ -138,13 +139,14 @@ pub fn check_purity(program: &Program) -> Vec<CheckError> {
         if fn_.pure {
             let mut stack = HashSet::new();
             if is_impure(fn_, &fns, &mut impure_cache, &mut stack) {
-                errors.push(CheckError {
-                    message: format!(
+                errors.push(KestrelcError::new(
+                    ErrorKind::Purity,
+                    format!(
                         "'{}' is marked pure but calls print or an impure function",
                         fn_.name
                     ),
-                    span: fn_.span,
-                });
+                    fn_.span,
+                ));
             }
         }
     }
@@ -160,16 +162,16 @@ pub fn check_purity(program: &Program) -> Vec<CheckError> {
 /// bodies, unlike `check_purity`) since misusing it is a bug regardless
 /// of the caller's own purity. Direct port of kestrel.js's
 /// `checkParallelMap` — same rules, same wording.
-pub fn check_parallel_map(program: &Program) -> Vec<CheckError> {
+pub fn check_parallel_map(program: &Program) -> Vec<KestrelcError> {
     let fns: HashMap<&str, &Fn> = program.iter().map(|f| (f.name.as_str(), f)).collect();
     let mut errors = Vec::new();
 
     // `span` is the *enclosing statement's* span, not the exact
-    // parallel_map(...) call's own position — see ast.rs's CheckError
-    // doc comment on the statement-granularity scope this is limited to.
-    fn visit_expr(e: &Expr, fns: &HashMap<&str, &Fn>, span: Span, errors: &mut Vec<CheckError>) {
-        let push = |errors: &mut Vec<CheckError>, message: String| {
-            errors.push(CheckError { message, span });
+    // parallel_map(...) call's own position — see error.rs's doc
+    // comment on the statement-granularity scope this is limited to.
+    fn visit_expr(e: &Expr, fns: &HashMap<&str, &Fn>, span: Span, errors: &mut Vec<KestrelcError>) {
+        let push = |errors: &mut Vec<KestrelcError>, message: String| {
+            errors.push(KestrelcError::new(ErrorKind::ParallelMap, message, span));
         };
         match e {
             Expr::Call { name, args } if name == "parallel_map" => {
@@ -224,7 +226,7 @@ pub fn check_parallel_map(program: &Program) -> Vec<CheckError> {
         }
     }
 
-    fn visit_stmt(s: &Stmt, fns: &HashMap<&str, &Fn>, errors: &mut Vec<CheckError>) {
+    fn visit_stmt(s: &Stmt, fns: &HashMap<&str, &Fn>, errors: &mut Vec<KestrelcError>) {
         match s {
             Stmt::Let { value, span, .. } | Stmt::Assign { value, span, .. } => {
                 visit_expr(value, fns, *span, errors)

@@ -85,26 +85,34 @@ kestrelc: fib.kes:3:12: Unexpected token 'RParen'
 shared by the CLI (`main.rs`) and `compile_to_wasm_bytes` (and so
 `kestrelc-web`/`kestrel-editor.html`'s "native (wasm)" engine). Every
 `Stmt` in `src/ast.rs` carries a `Span` (`src/span.rs` — `{ line, col,
-len }`) marking its first token, set by the parser; `purity::check_purity`,
-`purity::check_parallel_map`, and `typecheck::check_types` return
-`CheckError { message, span }` values pinned to the statement they were
-found in, instead of bare strings. `Span` itself is a consolidation —
-`line`/`col`/`len` used to be three separate fields copy-pasted across
-`Token`, `LexError`, `ParseError`, every `Stmt` variant, and `Fn`; now
-they're all one small `Copy` struct. Honest scope: statement
-granularity, not full per-expression — `let x = f(a) + g(b);` points at
-the start of the `let`, not at whichever of `f(a)`/`g(b)` was actually
-the problem.
+len }`) marking its first token, set by the parser. `Span` itself is a
+consolidation — `line`/`col`/`len` used to be three separate fields
+copy-pasted across `Token` and every stage's own error type; now
+they're all one small `Copy` struct.
 
-The native backend's own codegen errors (`codegen.rs`'s "kestrelc only
-supports X so far" / "Unknown identifier" / etc. — scope errors, not
-syntax errors) now carry a position too, but only a bare `line:col:`
-prefix, e.g. `kestrelc: 3:5: 'a' is an array — it can only be indexed...`
-— not the full `file:line:col:` + caret treatment above, since
-`codegen.rs` never has the original source text or filename threaded
-through it. Still open: the same for `wasm_codegen.rs`'s own errors, and
+Every stage's error type is unified too, into one
+`error::KestrelcError { kind, message, span }` (`kind` a small
+discriminant-only `ErrorKind` — `Lex`, `Parse`, `Purity`, `ParallelMap`,
+`Type`, `Codegen`), instead of five separate structs (`LexError`,
+`ParseError`, a purity/type `CheckError`, and one codegen error type per
+backend) that all carried the same message-and-position shape. `main.rs`
+renders every one of them through the same two small helpers
+(`report_one`/`report_many`) instead of five near-duplicated printing
+blocks. Real payoff, not just tidiness: codegen errors (`codegen.rs`'s
+"kestrelc only supports X so far" / "Unknown identifier" messages, and
+`wasm_codegen.rs`'s equivalents — scope errors, not syntax errors) used
+to be message-only or a bare `line:col:` prefix, since neither codegen
+backend had source text threaded through to build a caret. Now that
+every `Stmt` carries a real `Span` (with `len`) and every error is the
+same type main.rs already knows how to render, both codegen backends
+get the exact same full `file:line:col:` + caret treatment as everything
+else, for free.
+
+Honest scope: statement granularity everywhere, not full
+per-expression — `let x = f(a) + g(b);` points at the start of the
+`let`, not at whichever of `f(a)`/`g(b)` was actually the problem — and
 every backend's runtime errors (unknown identifier, out-of-bounds
-index, etc.), which still don't carry a source position at all. See
+index, etc.) still don't carry a source position at all. See
 `kestrel-DESIGN.md`'s roadmap for what's left.
 
 ## Compile cache

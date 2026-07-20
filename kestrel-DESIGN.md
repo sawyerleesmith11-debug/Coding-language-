@@ -396,32 +396,40 @@ real future work.
 positioned diagnostic, not just the JS backends: every `Stmt` in
 `kestrelc/src/ast.rs` carries a `Span` (`kestrelc/src/span.rs` —
 `{ line, col, len }`, consolidated from what used to be three separate
-copy-pasted fields duplicated across `Token`, `LexError`, `ParseError`,
-every `Stmt` variant, `Fn`, and `CheckError`) marking its first token,
-set by the parser. `check_purity`/`check_parallel_map`/`check_types`
-return `CheckError { message, span }` instead of a bare `String`, and
-`main.rs` / `lib.rs`'s `compile_to_wasm_bytes` render each one through
-the same `format_diagnostic` helper lex/parse errors already used — so
-`kestrelc` (native CLI, `--wasm`, and `kestrelc-web`) all get the real
-`file:line:col:` + caret treatment for purity, `parallel_map` misuse,
-and type errors too, at the same statement granularity as the JS
-backends.
+copy-pasted fields duplicated across `Token`, and every stage's own
+error type) marking its first token, set by the parser.
 
-Native `kestrelc`'s own codegen errors (`codegen.rs`'s "kestrelc only
-supports X so far" / "Unknown identifier" / "array variable rebound..."
-messages — the ones that fire when a program is syntactically fine but
-outside `kestrelc`'s current scope, per `kestrelc/README.md`'s Scope
-section) now carry a position too: `FnCodegen` tracks `cur_pos`, updated
-at the top of every `gen_stmt` call, and every user-facing error inside
-`FnCodegen` goes through a small `err()` helper that prefixes it with
-`line:col:`. Deliberately not the full `file:line:col:` + caret
-treatment above — `codegen.rs` never has the original source text or
-filename threaded through it, only line/col numbers, so a real caret
-line isn't buildable without a larger plumbing change; this is a
-smaller, honest step, not that one. Still open: the WASM backend's own
-codegen errors (`wasm_codegen.rs`), and runtime errors (unknown
-identifier, out-of-bounds index, etc.) in every backend, remain
-message-only.
+**Every stage's error type is now one type, too.** `LexError`,
+`ParseError`, `ast::CheckError`, `codegen::CodegenError`, and
+`wasm_codegen::WasmError` used to be five separate structs that all
+carried the same two things (a message and a position, or — for the two
+codegen errors — no position at all). `kestrelc/src/error.rs` now has
+one `KestrelcError { kind: ErrorKind, message: String, span: Span }`
+instead, `ErrorKind` a small discriminant-only enum (`Lex`, `Parse`,
+`Purity`, `ParallelMap`, `Type`, `Codegen`) naming which stage an error
+came from. Every stage returns this one type; `main.rs` has two small
+shared helpers (`report_one`, `report_many`) instead of five
+near-identical printing blocks, and `report_many` derives its header
+line ("Purity check failed", "parallel_map() check failed", ...) from
+`ErrorKind::label()` instead of a copy-pasted string per call site.
+
+This unification had a real, not just cosmetic, payoff: codegen errors
+(`codegen.rs`'s "kestrelc only supports X so far" / "Unknown
+identifier" messages, and `wasm_codegen.rs`'s equivalents — the ones
+that fire when a program is syntactically fine but outside `kestrelc`'s
+current scope, per `kestrelc/README.md`'s Scope section) used to be
+message-only (WASM) or a bare `line:col:` prefix (native), because
+neither codegen backend had the original source text threaded through
+to render a real caret. Since every `Stmt` now carries a full `Span`
+(including a real `len`, not just a start position) and every error
+flows through the same `KestrelcError` main.rs already knows how to
+render with `format_diagnostic`, both codegen backends get the full
+`file:line:col:` + caret treatment for free — no extra plumbing needed,
+just `FnCodegen`/`FnWasm` tracking `cur_span` (updated at the top of
+every `gen_stmt`) and a small `err()` helper on each. Still open:
+runtime errors (unknown identifier, out-of-bounds index, etc.) in every
+backend remain message-only, and position is still statement-
+granularity everywhere, not full per-expression.
 
 **Memoization, shipped (all backends, including native now):** both
 `run` and `runFast` cache a `pure fn`'s result by argument value, scoped
@@ -515,15 +523,13 @@ backend's codegen actually accepts. `kestrelc` now memoizes too (a
 separate optimization from fusion) — see the memoization section above.
 
 Not yet implemented (future work, roughly in priority order):
-1. Full per-expression position tracking — purity/type errors, in both
-   the JS backends *and* `kestrelc`'s own checkers now (see above), get
-   a real `file:line:col:` + caret, but pinned to the *statement*, not
-   the exact sub-expression; going finer needs a span on every AST
-   node, not just statements. Native `kestrelc`'s own codegen errors
-   also now carry a position (a bare `line:col:` prefix, not a full
-   caret — see above). Still open: the WASM backend's codegen errors,
-   and runtime errors (unknown identifier, out-of-bounds index, etc.)
-   in every backend, remain message-only.
+1. Full per-expression position tracking — purity/type/codegen errors,
+   in both the JS backends *and* every one of `kestrelc`'s own stages
+   now (one unified `KestrelcError` type — see above), get a real
+   `file:line:col:` + caret, but pinned to the *statement*, not the
+   exact sub-expression; going finer needs a span on every AST node,
+   not just statements. Still open: runtime errors (unknown identifier,
+   out-of-bounds index, etc.) in every backend remain message-only.
 2. Memoization is now in all backends (see above), scoped down for the
    native one to scalar-only parameters and a 64-slot cap, and
    `parallel_map`-chain fusion is now in both — still open: generalizing
