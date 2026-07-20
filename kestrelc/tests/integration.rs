@@ -1567,6 +1567,135 @@ fn the_71st_eligible_pure_fn_still_gets_memoized_past_the_old_64_slot_cap() {
     assert_eq!(native_stdout(&run), "1836311903\n");
 }
 
+#[test]
+fn a_memoized_array_param_fn_hashes_by_content_not_by_reused_stack_address() {
+    // The exact adversarial case codegen.rs's infer_array_param_lengths
+    // doc comment describes: `arr` is the same lexical `let`, so it's
+    // the *same stack address* every loop iteration, but a genuinely
+    // different value each time. A pointer-keyed cache would either
+    // always miss (fine, just no speedup) or — the real danger — return
+    // a stale result if some other reused-slot coincidence ever lined
+    // up; flattening by content instead means this must always compute
+    // the right answer regardless. sum3([i,i+1,i+2]) for i in 0..5 is
+    // 3, 6, 9, 12, 15 — total 45.
+    let scratch = scratch_dir("memo_array_param_content_hash");
+    let src_path = scratch.join("prog.kes");
+    fs::write(
+        &src_path,
+        "pure fn sum3(a: [i64; N]) -> i64 { return a[0] + a[1] + a[2]; }\n\
+         fn main() {\n\
+         \x20   let i = 0;\n\
+         \x20   let total = 0;\n\
+         \x20   while (i < 5) {\n\
+         \x20       let arr = [i, i + 1, i + 2];\n\
+         \x20       total = total + sum3(arr);\n\
+         \x20       i = i + 1;\n\
+         \x20   }\n\
+         \x20   print(total);\n\
+         }\n",
+    )
+    .unwrap();
+
+    let out = Command::new(kestrelc_bin())
+        .arg(&src_path)
+        .current_dir(&scratch)
+        .output()
+        .expect("failed to run kestrelc");
+    assert!(out.status.success(), "compile failed:\n{}", String::from_utf8_lossy(&out.stderr));
+
+    let bin = scratch.join("prog");
+    let run = Command::new(&bin).output().expect("failed to run compiled binary");
+    assert!(run.status.success(), "compiled binary exited with failure");
+    assert_eq!(native_stdout(&run), "45\n");
+}
+
+#[test]
+fn an_array_param_fn_called_with_disagreeing_lengths_still_compiles_and_runs_correctly() {
+    // infer_array_param_lengths requires *every* call site to agree on
+    // the same array length before a function is eligible for
+    // memoization at all — this program deliberately disagrees (one
+    // call with a 2-element array, one with 3), which should just mean
+    // "not memoized," not a compile error or a miscompile. Only reads
+    // indices 0/1 (valid in both) — Kestrel doesn't expose an array
+    // parameter's own runtime length as a value, so this deliberately
+    // doesn't need it.
+    let scratch = scratch_dir("memo_array_param_disagreeing_lengths");
+    let src_path = scratch.join("prog.kes");
+    fs::write(
+        &src_path,
+        "pure fn first_two(a: [i64; N]) -> i64 { return a[0] + a[1]; }\n\
+         fn main() {\n\
+         \x20   let a2 = [10, 20];\n\
+         \x20   let a3 = [1, 2, 3];\n\
+         \x20   print(first_two(a2), first_two(a3), first_two(a2));\n\
+         }\n",
+    )
+    .unwrap();
+
+    let out = Command::new(kestrelc_bin())
+        .arg(&src_path)
+        .current_dir(&scratch)
+        .output()
+        .expect("failed to run kestrelc");
+    assert!(out.status.success(), "compile failed:\n{}", String::from_utf8_lossy(&out.stderr));
+
+    let bin = scratch.join("prog");
+    let run = Command::new(&bin).output().expect("failed to run compiled binary");
+    assert!(run.status.success(), "compiled binary exited with failure");
+    assert_eq!(native_stdout(&run), "30 3 30\n");
+}
+
+#[test]
+fn an_array_param_fn_with_one_agreed_length_actually_gets_memoized() {
+    // The previous two tests only prove correctness — a broken
+    // eligibility check that never actually memoizes anything would
+    // still pass both. This proves the memo slot is real: `heavy` does
+    // 100,000,000 loop iterations of real work per call, called three
+    // times with the exact same array. Measured on this machine: one
+    // real call takes ~395ms; three real (unmemoized) calls would take
+    // ~1.2s. If the second and third calls are actual cache hits, all
+    // three together cost about the same as one.
+    let scratch = scratch_dir("memo_array_param_actually_memoized");
+    let src_path = scratch.join("prog.kes");
+    fs::write(
+        &src_path,
+        "pure fn heavy(a: [i64; N]) -> i64 {\n\
+         \x20   let total = a[0];\n\
+         \x20   let i = 0;\n\
+         \x20   while (i < 100000000) {\n\
+         \x20       total = (total + 1) % 1000000007;\n\
+         \x20       i = i + 1;\n\
+         \x20   }\n\
+         \x20   return total + a[1];\n\
+         }\n\
+         fn main() {\n\
+         \x20   let arr = [5, 7];\n\
+         \x20   print(heavy(arr));\n\
+         \x20   print(heavy(arr));\n\
+         \x20   print(heavy(arr));\n\
+         }\n",
+    )
+    .unwrap();
+
+    let out = Command::new(kestrelc_bin())
+        .arg(&src_path)
+        .current_dir(&scratch)
+        .output()
+        .expect("failed to run kestrelc");
+    assert!(out.status.success(), "compile failed:\n{}", String::from_utf8_lossy(&out.stderr));
+
+    let bin = scratch.join("prog");
+    let start = std::time::Instant::now();
+    let run = Command::new(&bin).output().expect("failed to run compiled binary");
+    let elapsed = start.elapsed();
+    assert!(run.status.success(), "compiled binary exited with failure");
+    assert!(
+        elapsed.as_millis() < 800,
+        "three calls to heavy(arr) took {elapsed:?} — looks like the array-parameter memo slot isn't actually being used"
+    );
+    assert_eq!(native_stdout(&run), "100000012\n100000012\n100000012\n");
+}
+
 // ==================== per-expression spans ====================
 
 #[test]

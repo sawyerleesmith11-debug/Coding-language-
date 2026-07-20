@@ -52,22 +52,221 @@ struct ProfileState {
 /// opposite reason inline.rs uses it: that set is exactly "functions
 /// ever called from more than one OS thread," so excluding them is what
 /// makes the runtime cache in `kestrelc_runtime.c` safe with zero
-/// locking), and has only scalar (no array) parameters — arrays would
-/// need per-element hashing this first pass doesn't implement. No cap on
-/// how many functions can be eligible — `kestrelc_runtime.c`'s outer
-/// slot table grows on demand (see `kestrelc_memo_ensure_slot_capacity`
-/// there); a fixed 64-slot cap used to exist here and silently stop
-/// memoizing past it, removed once the runtime side could grow. Always
-/// active (unlike `ProfileState`, doesn't depend on a cache directory
-/// existing) — `slots` is simply empty when there's nothing eligible.
+/// locking), and either has only scalar parameters or has array
+/// parameters whose length `infer_array_param_lengths` (below) proved
+/// is the same compile-time-known value at every call site in the whole
+/// program — see that function's doc comment for exactly why that proof
+/// is required, not just an optimization nicety. `flattened_nargs` is
+/// the total number of `i64` values this function's memo key actually
+/// packs (1 per scalar param, N per array param of proven length N),
+/// used to size the args buffer and as the `nargs` argument to the
+/// runtime's lookup/store calls — no longer simply `f.params.len()`
+/// once an array parameter is involved. No cap on how many functions
+/// can be eligible — `kestrelc_runtime.c`'s outer slot table grows on
+/// demand (see `kestrelc_memo_ensure_slot_capacity` there); a fixed
+/// 64-slot cap used to exist here and silently stop memoizing past it,
+/// removed once the runtime side could grow. Always active (unlike
+/// `ProfileState`, doesn't depend on a cache directory existing) —
+/// `slots` is simply empty when there's nothing eligible.
 struct MemoState {
     lookup_id: FuncId,
     store_id: FuncId,
-    slots: HashMap<Symbol, i32>,
+    slots: HashMap<Symbol, MemoSlot>,
 }
 
-/// Mirrors `KESTRELC_MEMO_MAX_ARGS` in kestrelc_runtime.c.
-const MEMO_MAX_ARGS: usize = 4;
+struct MemoSlot {
+    slot: i32,
+    flattened_nargs: usize,
+    /// One entry per array-typed parameter, in parameter order (empty
+    /// for a function with only scalar parameters) — the proven
+    /// call-site-agreed length for that parameter, from
+    /// `infer_array_param_lengths`.
+    array_param_lens: Vec<usize>,
+}
+
+/// Mirrors `KESTRELC_MEMO_MAX_ARGS` in kestrelc_runtime.c. Small fixed
+/// arrays only: a function with more flattened args than this (a few
+/// scalars, or one array past a modest length) just doesn't get a memo
+/// slot at all, same graceful "no proof, no optimization" posture as
+/// everywhere else this cache touches codegen — not an error, not a
+/// partial/truncated cache key.
+const MEMO_MAX_ARGS: usize = 16;
+
+/// Array-parameter memoization needs to hash/compare by the array's
+/// *contents*, not its address — a memoized function's cache key packs
+/// real values into a flat buffer (see `kestrelc_runtime.c`'s
+/// `kestrelc_memo_hash`), and a raw pointer would be actively wrong, not
+/// just a missed optimization: kestrelc's array arguments are always
+/// caller-owned stack memory, so two calls with genuinely different
+/// array *values* could reuse the exact same stack address across
+/// separate calls, and a pointer-keyed cache would then return the
+/// *previous* call's cached result for what is actually a different
+/// input. Flattening element values instead avoids that entirely. The
+/// catch: kestrelc requires a call-site array argument to be a
+/// literal-length `let`, but a function's own array *parameter* type
+/// (`[T; N]`) is generic over `N` — nothing stops two different call
+/// sites from passing different-length arrays to the same function,
+/// and this pass has no runtime-length loop (a real one, in Cranelift
+/// IR, would be needed to flatten a length not known until the function
+/// is actually entered — deliberately not attempted here; see
+/// kestrel-DESIGN.md). So the only sound compile-time-only proof is:
+/// scan every call site in the whole program, and if *all* of them
+/// agree on the same compile-time-known length for a given array
+/// parameter position, treat that as if the parameter had that fixed
+/// length — the flattening loop below is then a plain compile-time Rust
+/// `for` loop unrolling exactly N `load`/`store` IR instructions, no
+/// different in kind from `gen_binding`'s existing array-literal store
+/// loop. Any call site with an unprovable or disagreeing length makes
+/// that whole parameter position (and so the function) ineligible —
+/// not an error, just unmemoized, same as everything else.
+fn infer_array_param_lengths(program: &Program) -> HashMap<Symbol, Vec<usize>> {
+    enum Proof {
+        Unseen,
+        Agreed(usize),
+        Disagreed,
+    }
+
+    // Which parameter positions of each function are array-typed, in
+    // declaration order — both to size each function's proof vector and
+    // to know which call-site argument positions actually matter.
+    let array_positions: HashMap<Symbol, Vec<usize>> = program
+        .iter()
+        .map(|f| {
+            let positions = f
+                .params
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| matches!(p.ty, Type::Array { .. }))
+                .map(|(i, _)| i)
+                .collect();
+            (f.name, positions)
+        })
+        .collect();
+
+    let mut proofs: HashMap<Symbol, Vec<Proof>> = HashMap::new();
+
+    fn visit_expr(
+        e: &Expr,
+        known_lens: &HashMap<Symbol, usize>,
+        array_positions: &HashMap<Symbol, Vec<usize>>,
+        proofs: &mut HashMap<Symbol, Vec<Proof>>,
+    ) {
+        match &e.kind {
+            ExprKind::Call { name, args } => {
+                if let Some(positions) = array_positions.get(name) {
+                    if !positions.is_empty() {
+                        let entry = proofs.entry(*name).or_insert_with(|| {
+                            positions.iter().map(|_| Proof::Unseen).collect()
+                        });
+                        for (slot_idx, &pos) in positions.iter().enumerate() {
+                            // Missing/short arg lists are a separate
+                            // (parse/typecheck-level) problem; just skip
+                            // rather than poisoning the proof over it.
+                            let Some(arg) = args.get(pos) else { continue };
+                            let this_len = match &arg.kind {
+                                ExprKind::ArrayLit(elems) => Some(elems.len()),
+                                ExprKind::Ident(n) => known_lens.get(n).copied(),
+                                _ => None,
+                            };
+                            entry[slot_idx] = match (&entry[slot_idx], this_len) {
+                                (Proof::Unseen, Some(n)) => Proof::Agreed(n),
+                                (Proof::Unseen, None) => Proof::Disagreed,
+                                (Proof::Agreed(prev), Some(n)) if *prev == n => Proof::Agreed(n),
+                                (Proof::Agreed(_), _) => Proof::Disagreed,
+                                (Proof::Disagreed, _) => Proof::Disagreed,
+                            };
+                        }
+                    }
+                }
+                for a in args {
+                    visit_expr(a, known_lens, array_positions, proofs);
+                }
+            }
+            ExprKind::Binop { left, right, .. } => {
+                visit_expr(left, known_lens, array_positions, proofs);
+                visit_expr(right, known_lens, array_positions, proofs);
+            }
+            ExprKind::Unary { expr, .. } => visit_expr(expr, known_lens, array_positions, proofs),
+            ExprKind::Index { target, index } => {
+                visit_expr(target, known_lens, array_positions, proofs);
+                visit_expr(index, known_lens, array_positions, proofs);
+            }
+            ExprKind::ArrayLit(elems) => {
+                for el in elems {
+                    visit_expr(el, known_lens, array_positions, proofs);
+                }
+            }
+            ExprKind::Num(_) | ExprKind::Str(_) | ExprKind::Bool(_) | ExprKind::Ident(_) => {}
+        }
+    }
+
+    fn visit_stmts(
+        stmts: &[Stmt],
+        known_lens: &mut HashMap<Symbol, usize>,
+        array_positions: &HashMap<Symbol, Vec<usize>>,
+        proofs: &mut HashMap<Symbol, Vec<Proof>>,
+    ) {
+        for s in stmts {
+            match s {
+                Stmt::Let { name, value, .. } => {
+                    visit_expr(value, known_lens, array_positions, proofs);
+                    if let ExprKind::ArrayLit(elems) = &value.kind {
+                        known_lens.insert(*name, elems.len());
+                    }
+                }
+                Stmt::Assign { value, .. } => visit_expr(value, known_lens, array_positions, proofs),
+                Stmt::If { cond, then_block, else_block, .. } => {
+                    visit_expr(cond, known_lens, array_positions, proofs);
+                    visit_stmts(then_block, known_lens, array_positions, proofs);
+                    if let Some(eb) = else_block {
+                        visit_stmts(eb, known_lens, array_positions, proofs);
+                    }
+                }
+                Stmt::While { cond, body, .. } => {
+                    visit_expr(cond, known_lens, array_positions, proofs);
+                    visit_stmts(body, known_lens, array_positions, proofs);
+                }
+                Stmt::Print { args, .. } => {
+                    for a in args {
+                        visit_expr(a, known_lens, array_positions, proofs);
+                    }
+                }
+                Stmt::Return { value: Some(v), .. } => visit_expr(v, known_lens, array_positions, proofs),
+                Stmt::Return { value: None, .. } => {}
+                Stmt::ExprStmt { expr, .. } => visit_expr(expr, known_lens, array_positions, proofs),
+            }
+        }
+    }
+
+    for f in program {
+        // A bare array *parameter* (not a `let`) never has a
+        // compile-time-known length here — only `let`-bound literal or
+        // literal-length-derived locals do (matching
+        // codegen.rs::slot_kind_for_let's own known_lens). A call site
+        // that forwards its own array parameter untouched (e.g. a
+        // recursive helper) is therefore always "unprovable" by this
+        // pass — a deliberate, honest scope limit, not a bug: proving
+        // that case would need to reason about the *caller's own*
+        // eligibility first, a cross-function fixpoint this
+        // whole-program-but-single-pass analysis doesn't attempt.
+        let mut known_lens: HashMap<Symbol, usize> = HashMap::new();
+        visit_stmts(&f.body, &mut known_lens, &array_positions, &mut proofs);
+    }
+
+    proofs
+        .into_iter()
+        .filter_map(|(name, proof)| {
+            let lens: Option<Vec<usize>> = proof
+                .into_iter()
+                .map(|p| match p {
+                    Proof::Agreed(n) => Some(n),
+                    Proof::Unseen | Proof::Disagreed => None,
+                })
+                .collect();
+            lens.map(|lens| (name, lens))
+        })
+        .collect()
+}
 
 pub struct Codegen {
     module: ObjectModule,
@@ -270,21 +469,41 @@ impl Codegen {
 
     pub fn compile_program(&mut self, program: &Program) -> Result<(), KestrelcError> {
         let pmap_callbacks = crate::inline::collect_parallel_map_callbacks(program);
+        let array_param_lens = infer_array_param_lengths(program);
         let mut next_memo_slot: i32 = 0;
 
         // Pass 1: declare every function's signature so calls (including
         // forward references and recursion) can be resolved regardless
         // of source order.
         for f in program {
-            if f.pure
-                && &*f.name.resolve() != "main"
-                && !pmap_callbacks.contains(&f.name)
-                && !f.params.is_empty()
-                && f.params.len() <= MEMO_MAX_ARGS
-                && f.params.iter().all(|p| matches!(p.ty, Type::Named(_)))
-            {
-                self.memo.slots.insert(f.name, next_memo_slot);
-                next_memo_slot += 1;
+            if f.pure && &*f.name.resolve() != "main" && !pmap_callbacks.contains(&f.name) && !f.params.is_empty() {
+                let has_array_params = f.params.iter().any(|p| matches!(p.ty, Type::Array { .. }));
+                // Either every parameter is scalar (the original,
+                // simpler case), or every array parameter's length was
+                // proven the same at every call site in the program —
+                // see infer_array_param_lengths's doc comment for why
+                // that proof is required, not optional, before an array
+                // parameter can be memoized at all.
+                let array_lens = if has_array_params {
+                    array_param_lens.get(&f.name).cloned()
+                } else {
+                    Some(Vec::new())
+                };
+                if let Some(array_lens) = array_lens {
+                    let flattened_nargs = f.params.iter().enumerate().fold(0usize, |acc, (i, p)| {
+                        acc + match &p.ty {
+                            Type::Named(_) => 1,
+                            Type::Array { .. } => {
+                                let array_idx = f.params[..i].iter().filter(|q| matches!(q.ty, Type::Array { .. })).count();
+                                array_lens[array_idx]
+                            }
+                        }
+                    });
+                    if flattened_nargs <= MEMO_MAX_ARGS {
+                        self.memo.slots.insert(f.name, MemoSlot { slot: next_memo_slot, flattened_nargs, array_param_lens: array_lens });
+                        next_memo_slot += 1;
+                    }
+                }
             }
             let sig = Self::fn_signature(f, self.call_conv);
             let fn_name_text = f.name.resolve();
@@ -405,27 +624,56 @@ impl Codegen {
             }
 
             // Memoization: if this function was assigned a slot (see
-            // compile_program's eligibility check), pack its scalar
-            // params into a small stack buffer and ask the runtime cache
-            // whether this exact argument list was already computed. A
-            // hit returns immediately, skipping the body entirely; a
-            // miss falls through into normal codegen below, with
-            // `memo_args_ptr` remembered so the epilogue (below) can
-            // store the freshly-computed result before the function
-            // actually returns.
-            let my_memo_slot = self.memo.slots.get(&f.name).copied();
+            // compile_program's eligibility check), pack its params —
+            // scalars directly, array params by flattening their proven
+            // fixed length's worth of elements (a plain compile-time
+            // Rust `for` loop over a known usize, emitting that many
+            // load/store IR instruction pairs — not a runtime loop; see
+            // infer_array_param_lengths) — into a small stack buffer and
+            // ask the runtime cache whether this exact argument list was
+            // already computed. A hit returns immediately, skipping the
+            // body entirely; a miss falls through into normal codegen
+            // below, with `memo_args_ptr` remembered so the epilogue
+            // (below) can store the freshly-computed result before the
+            // function actually returns.
+            // Cloned out (not borrowed) up front, same reason the
+            // original scalar-only version used `.copied()` here: this
+            // stays alive across later `self.module`/`fc.module` calls
+            // below, and a live borrow of `self.memo.slots` would
+            // conflict with those on a different field of `self`.
+            let my_memo_slot: Option<(i32, usize, Vec<usize>)> = self
+                .memo
+                .slots
+                .get(&f.name)
+                .map(|m| (m.slot, m.flattened_nargs, m.array_param_lens.clone()));
             let mut memo_args_ptr: Option<Value> = None;
-            if let Some(slot) = my_memo_slot {
-                let nargs = f.params.len();
+            if let Some((slot, nargs, array_param_lens)) = &my_memo_slot {
+                let nargs = *nargs;
                 let args_size = (nargs * 8) as u32;
                 let args_slot = builder.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, args_size, 3));
                 let args_ptr = builder.ins().stack_addr(types::I64, args_slot, 0);
-                for (i, p) in f.params.iter().enumerate() {
-                    if let Slot::Scalar(v) = &vars[&p.name] {
-                        let val = builder.use_var(*v);
-                        builder.ins().store(MemFlags::new(), val, args_ptr, (i * 8) as i32);
+                let mut offset = 0usize;
+                let mut array_idx = 0usize;
+                for p in &f.params {
+                    match &vars[&p.name] {
+                        Slot::Scalar(v) => {
+                            let val = builder.use_var(*v);
+                            builder.ins().store(MemFlags::new(), val, args_ptr, (offset * 8) as i32);
+                            offset += 1;
+                        }
+                        Slot::Array { ptr, .. } => {
+                            let len = array_param_lens[array_idx];
+                            array_idx += 1;
+                            let base = builder.use_var(*ptr);
+                            for i in 0..len {
+                                let v = builder.ins().load(types::I64, MemFlags::new(), base, (i * 8) as i32);
+                                builder.ins().store(MemFlags::new(), v, args_ptr, ((offset + i) * 8) as i32);
+                            }
+                            offset += len;
+                        }
                     }
                 }
+                let slot = *slot;
                 let out_slot = builder.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 8, 3));
                 let out_ptr = builder.ins().stack_addr(types::I64, out_slot, 0);
                 let slot_val = builder.ins().iconst(types::I32, slot as i64);
@@ -518,7 +766,7 @@ impl Codegen {
                             );
                         }
                     }
-                } else if let Some(slot) = my_memo_slot {
+                } else if let Some((slot, nargs, _)) = &my_memo_slot {
                     // A cache miss reached here (a hit already returned
                     // directly from `hit_blk` above, before the body
                     // ever ran) — store the just-computed result under
@@ -527,8 +775,8 @@ impl Codegen {
                     // arguments hits the cache instead of recomputing.
                     let args_ptr = memo_args_ptr.expect("memo epilogue implies memo_args_ptr was set");
                     let ret_val = fc.builder.use_var(ret_var);
-                    let slot_val = fc.builder.ins().iconst(types::I32, slot as i64);
-                    let nargs_val = fc.builder.ins().iconst(types::I32, f.params.len() as i64);
+                    let slot_val = fc.builder.ins().iconst(types::I32, *slot as i64);
+                    let nargs_val = fc.builder.ins().iconst(types::I32, *nargs as i64);
                     let local_store = fc.module.declare_func_in_func(self.memo.store_id, fc.builder.func);
                     fc.builder.ins().call(local_store, &[slot_val, args_ptr, nargs_val, ret_val]);
                 }

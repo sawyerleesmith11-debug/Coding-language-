@@ -384,14 +384,33 @@ because `kestrelc_runtime.c` kept the outer per-function table as a
 fixed-size 64-entry array. That cap is gone: the outer table
 (`kestrelc_memo_tables`/`_counts`/`_caps`) now grows on demand (doubling,
 same as each slot's own hash table already did), so a program with any
-number of eligible pure fns memoizes all of them. Still scoped down from
-the JS backends' version in one way, unchanged: only functions with
-*scalar* (no array) parameters are eligible — arrays would need
-per-element hashing (correctness matters here, not just perf: a naive
-pointer-based hash would risk a false cache hit if two calls' array
-arguments happened to reuse the same stack address, since array
-arguments are always caller-owned stack memory, not heap-allocated) that
-this pass still doesn't implement.
+number of eligible pure fns memoizes all of them.
+
+Array parameters are eligible too now, narrowly: kestrelc requires a
+call-site array argument to be a literal-length `let`, but the
+*callee*'s own parameter type (`[T; N]`) is generic over `N`, so two
+call sites could legitimately pass different lengths to the same
+function. `codegen.rs`'s `infer_array_param_lengths` proves, across the
+whole program, whether every call site to a given function agrees on
+the same length for each array parameter — only then is that function
+eligible; a disagreeing or unprovable length just means unmemoized,
+same graceful posture as everything else here. When it does qualify,
+flattening each array argument's elements into the memo cache's flat
+buffer is a plain compile-time `for` loop over the proven length (no
+different from `gen_binding`'s existing array-literal store loop, no
+runtime loop involved) — `MEMO_MAX_ARGS` (mirrored in
+`kestrelc_runtime.c`) went from 4 to 16 to give small arrays room.
+Hashing/comparing by content, not by pointer, matters for correctness,
+not just perf: array arguments are always caller-owned stack memory, so
+two calls with different array *values* (e.g. a `let` rebound each loop
+iteration) can share the exact same address — a pointer-keyed cache
+could then return a stale result for what's actually a different input.
+See `tests/integration.rs`'s
+`a_memoized_array_param_fn_hashes_by_content_not_by_reused_stack_address`
+for that exact case, still correct. The fully general case — different
+call sites legitimately using different lengths on the *same* memoized
+function — would need a real runtime-length copy loop in Cranelift IR;
+deliberately not attempted (see `kestrel-DESIGN.md`).
 
 ## Benchmarks
 

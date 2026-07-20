@@ -634,31 +634,54 @@ actual disqualifying call/print). Runtime errors (unknown identifier,
 out-of-bounds index, etc.) in every backend remain message-only,
 unaffected by this — a compile-time-only pass.
 
+**Array-parameter memoization, shipped (narrow, `kestrelc` native
+only):** native memoization's 64-slot cap is gone (`kestrelc_runtime.c`'s
+outer per-function table grows on demand now, same doubling-growth idea
+each slot's own hash table already had) — see `tests/integration.rs`'s
+`the_71st_eligible_pure_fn_still_gets_memoized_past_the_old_64_slot_cap`.
+The scalar-only parameter restriction is also lifted, but deliberately
+narrower than the general case: kestrelc requires a call-site array
+argument to be a literal-length `let`, but the *callee*'s own parameter
+type (`[T; N]`) is generic over `N` — nothing stops two different call
+sites from passing different-length arrays to the same function. A real
+fix for the fully general case needs a runtime-length copy loop emitted
+in Cranelift IR (the element count isn't known until the function is
+actually entered) plus dynamic bounds-checking around the whole memo
+path — real complexity risk on a currently well-tested feature, so
+instead of that, `codegen.rs`'s `infer_array_param_lengths` does a
+whole-program, compile-time-only proof: a function with array
+parameters is only memo-eligible if *every* call site anywhere in the
+program agrees on the same length for each array parameter position
+(disagreement, or an unprovable length, just makes it unmemoized —
+same "no proof, no optimization" posture as everywhere else in this
+file). When that holds, flattening is a plain compile-time Rust `for`
+loop over the known length — no different in kind from `gen_binding`'s
+existing array-literal store loop, no new Cranelift loop machinery.
+`MEMO_MAX_ARGS` (mirrored in `kestrelc_runtime.c`) went from 4 to 16 to
+give small arrays room. Flattening by content instead of by pointer
+isn't just tidiness: kestrelc's array arguments are always caller-owned
+stack memory, so two calls with genuinely different array *values*
+could reuse the exact same stack address across separate calls (e.g. a
+`let` inside a loop, rebound each iteration) — a pointer-keyed cache
+would then risk returning a stale result for what is actually a
+different input, not just missing a cache hit. See
+`tests/integration.rs`'s
+`a_memoized_array_param_fn_hashes_by_content_not_by_reused_stack_address`
+(exactly that adversarial reused-address case, still correct),
+`an_array_param_fn_called_with_disagreeing_lengths_still_compiles_and_runs_correctly`,
+and `an_array_param_fn_with_one_agreed_length_actually_gets_memoized`
+(a real timing proof, not just a correctness one).
+
 Not yet implemented (future work, roughly in priority order):
-1. Memoization is now in all backends (see above); `parallel_map`-chain
-   fusion is now in both, and the two `let`s no longer need to be
+1. `parallel_map`-chain fusion's two `let`s no longer need to be
    textually adjacent (see the loop fusion section above) — still open:
    generalizing fusion to shapes beyond a `parallel_map`-to-`parallel_map`
    chain at all (e.g. a plain `while`-loop calling multiple pure fns per
-   iteration). Native memoization's 64-slot cap
-   is gone (`kestrelc_runtime.c`'s outer per-function table grows on
-   demand now, same doubling-growth idea as each slot's own hash table
-   already had) — see `tests/integration.rs`'s
-   `the_71st_eligible_pure_fn_still_gets_memoized_past_the_old_64_slot_cap`.
-   Still open: the scalar-only parameter restriction. Lifting it turned
-   out to be a meaningfully bigger change than the slot cap was, not
-   just a bigger constant — kestrelc requires an array argument to be a
-   literal-length `let` at the call site, but the *callee*'s own
-   parameter type (`[T; N]`) is generic over `N`, a symbolic bound, not
-   a fixed compile-time length; the same memoized function can
-   legitimately be called with different-length arrays from different
-   call sites. Flattening an array argument into the memo cache's flat
-   `i64` buffer (the only sound way to hash/compare by content instead
-   of by pointer — see the README's memoization section for why a raw
-   pointer compare would be an actual correctness bug, not just a
-   missed cache hit) needs a real runtime-length copy loop emitted in
-   Cranelift IR, since the element count isn't known until the function
-   is actually entered. Scoped out of this round rather than rushed.
+   iteration). Array-parameter memoization's own still-open gap: the
+   fully general case (different call sites legitimately passing
+   different-length arrays to the same memoized function) needs the
+   runtime-length Cranelift loop described above — deliberately not
+   attempted this round.
 2. Proof-based bounds-check *elision* in `kestrelc` — **the design
    doc's own `get_safe` example now works exactly as originally
    specified**: `where i < N` is proven at every call site (a literal

@@ -270,7 +270,12 @@ void kestrelc_profile_record(const char* path, long long path_len, const char* n
 // parallel_map callback), only ever called from the single thread that
 // calls them directly, so growing the outer table needs no locking
 // either, same as everything else here.
-#define KESTRELC_MEMO_MAX_ARGS 4
+// Mirrors codegen.rs's MEMO_MAX_ARGS. Raised from 4 once
+// array-parameter memoization needed room to flatten a small array's
+// elements into the same flat buffer, not just a handful of scalars —
+// see codegen.rs's infer_array_param_lengths for why only small,
+// call-site-length-agreed arrays are eligible at all.
+#define KESTRELC_MEMO_MAX_ARGS 16
 #define KESTRELC_MEMO_INITIAL_CAP 16 // must be a power of 2
 #define KESTRELC_MEMO_INITIAL_SLOT_CAPACITY 16
 
