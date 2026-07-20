@@ -386,6 +386,17 @@ before stringifying to keep those cases from colliding on the same key.
 at all yet — this is JS-backends-first, matching the project's usual
 pattern of new semantics landing there before the native compiler.
 
+**Measured** on this machine, `runFast`, external-process/best-of-5
+timing: naive recursive `fib(32)` — **2.7ms memoized vs 465ms
+unmemoized, ~170x faster**, both producing the identical result
+(2178309). This is the case memoization is actually meant for: naive
+recursive `fib` recomputes the same sub-values exponentially many
+times across the call tree, so caching collapses it from exponential
+to linear. Not every `pure fn` will see anything like this — a
+function with few or no repeated argument values across a run gets no
+benefit and pays a small `JSON.stringify`-per-call cache-key overhead
+instead; this is the best case, not a general multiplier.
+
 **Loop fusion, shipped (JS backends only, narrow shape):** both `run`
 and `runFast` now fuse a chain of `let a = parallel_map(f, arr); let b
 = parallel_map(g, a);` — with `a` used nowhere else in the function —
@@ -405,6 +416,15 @@ source that isn't a bare `parallel_map` call are all left unfused
 rather than guessed at. General loop fusion beyond `parallel_map`
 chains specifically (e.g. a plain `while`-loop calling multiple pure
 fns per iteration) is still unaddressed.
+
+**Measured** on this machine, `runFast`, external-process/best-of-5
+timing: a two-stage chain over a 5,000-element array — **968ms fused
+vs 2026ms unfused, ~2.1x faster**, identical results both ways. Real,
+but modest compared to memoization's number above, and honestly so:
+`run`/`runFast` execute `parallel_map` sequentially (see idea #5 above
+— real thread-level parallelism is `kestrelc`'s native backend only),
+so fusion's entire benefit here is one array pass instead of two, not
+added parallelism.
 
 **Loop fusion in `kestrelc` too, shipped:** a direct Rust port of the
 same AST pass (`kestrelc/src/fusion.rs`'s `fuse_loops`), same exact
