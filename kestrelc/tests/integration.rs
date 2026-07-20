@@ -1419,3 +1419,37 @@ fn a_function_used_as_a_parallel_map_callback_is_never_memoized_and_still_runs_c
     assert!(run.status.success());
     assert_eq!(native_stdout(&run), "3 15\n27\n");
 }
+
+// ==================== codegen error positions ====================
+
+#[test]
+fn a_codegen_error_now_carries_a_line_col_prefix_not_just_a_bare_message() {
+    // Purity/parallel_map/type-check errors already got real
+    // file:line:col: + caret diagnostics (see the earlier caret tests
+    // above) — this is the next stage, codegen.rs's own errors, which
+    // used to be message-only. No source text is threaded into
+    // codegen.rs, so this is a bare `line:col:` prefix, not a full
+    // caret rendering — see FnCodegen::err's doc comment.
+    let scratch = scratch_dir("codegen_err_pos");
+    let src_path = scratch.join("prog.kes");
+    fs::write(
+        &src_path,
+        "fn main() {\n\
+         \x20   let a = [1, 2, 3];\n\
+         \x20   print(a);\n\
+         }\n",
+    )
+    .unwrap();
+
+    let out = Command::new(kestrelc_bin())
+        .arg(&src_path)
+        .current_dir(&scratch)
+        .output()
+        .expect("failed to run kestrelc");
+    assert!(!out.status.success(), "kestrelc should reject using an array value directly");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("3:5:") && stderr.contains("it can only be indexed"),
+        "expected a '3:5:' position prefix on the codegen error, got:\n{stderr}"
+    );
+}

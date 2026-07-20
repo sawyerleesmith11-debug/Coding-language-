@@ -485,6 +485,7 @@ impl Codegen {
                 where_info: &self.where_info,
                 my_where: self.where_info.get(&f.name),
                 epilogue,
+                cur_pos: (f.line, f.col),
             };
             let terminated = fc.gen_block(&f.body)?;
             if let Some((epilogue_blk, ret_var)) = fc.epilogue {
@@ -679,9 +680,30 @@ struct FnCodegen<'a> {
     /// flush calls Codegen::compile_fn emits there run exactly once no
     /// matter which return statement actually ends the program.
     epilogue: Option<(Block, Variable)>,
+    /// The line/col of the statement `gen_stmt` is currently generating
+    /// code for — updated at the top of every `gen_stmt` call (see
+    /// there), read by `err()` below. Same statement-granularity
+    /// tradeoff as purity.rs/typecheck.rs's `CheckError`: a codegen
+    /// error anywhere inside one statement's expression tree points at
+    /// that whole statement, not the exact sub-expression.
+    cur_pos: (usize, usize),
 }
 
 type CgResult<T> = Result<T, CodegenError>;
+
+impl<'a> FnCodegen<'a> {
+    /// Builds a `CodegenError` prefixed with `cur_pos` — the small,
+    /// bare `line:col:` version of the diagnostics purity.rs/typecheck.rs
+    /// already get through `format_diagnostic` (see ast.rs's
+    /// `CheckError`), not the fuller `file:line:col:` + caret rendering:
+    /// `codegen.rs` never has the original source text or filename
+    /// threaded through it, only line/col numbers, so a real caret line
+    /// isn't buildable here without a larger plumbing change. Still a
+    /// real improvement over a bare message with no position at all.
+    fn err(&self, message: String) -> CodegenError {
+        CodegenError(format!("{}:{}: {message}", self.cur_pos.0, self.cur_pos.1))
+    }
+}
 
 impl<'a> FnCodegen<'a> {
     /// Generates a statement sequence. Returns true if every path through
@@ -713,7 +735,7 @@ impl<'a> FnCodegen<'a> {
                     // Only possible if the same name is bound to two
                     // differently-sized literals in different branches —
                     // collect_slots only records the first occurrence's size.
-                    return Err(CodegenError(format!(
+                    return Err(self.err(format!(
                         "kestrelc: array variable '{name}' rebound with a different length ({} vs {expected}) — not supported",
                         elems.len()
                     )));
@@ -739,7 +761,7 @@ impl<'a> FnCodegen<'a> {
                 let func_name = match &args[0] {
                     Expr::Ident(n) => n.clone(),
                     _ => {
-                        return Err(CodegenError(
+                        return Err(self.err(
                             "parallel_map()'s first argument must be a bare function name".into(),
                         ))
                     }
@@ -747,15 +769,15 @@ impl<'a> FnCodegen<'a> {
                 let callee_id = *self
                     .fn_ids
                     .get(&func_name)
-                    .ok_or_else(|| CodegenError(format!("Unknown function '{func_name}'")))?;
+                    .ok_or_else(|| self.err(format!("Unknown function '{func_name}'")))?;
                 let elem_count = self.static_array_len(&args[1]).ok_or_else(|| {
-                    CodegenError(
+                    self.err(
                         "kestrelc only supports parallel_map over a fixed-size array literal (`let x = [...]`) so far, not an array parameter".into(),
                     )
                 })?;
                 let expected = literal_len.expect("array let-bindings always have a literal_len");
                 if elem_count != expected {
-                    return Err(CodegenError(format!(
+                    return Err(self.err(format!(
                         "kestrelc: array variable '{name}' rebound with a different length ({elem_count} vs {expected}) — not supported"
                     )));
                 }
@@ -786,13 +808,22 @@ impl<'a> FnCodegen<'a> {
                 self.builder.def_var(len, len_val);
                 Ok(())
             }
-            (Slot::Array { .. }, _) => Err(CodegenError(format!(
+            (Slot::Array { .. }, _) => Err(self.err(format!(
                 "kestrelc: '{name}' is an array variable and can only be (re)bound to an array literal so far"
             ))),
         }
     }
 
     fn gen_stmt(&mut self, s: &Stmt) -> CgResult<bool> {
+        self.cur_pos = match s {
+            Stmt::Let { line, col, .. }
+            | Stmt::Assign { line, col, .. }
+            | Stmt::If { line, col, .. }
+            | Stmt::While { line, col, .. }
+            | Stmt::Print { line, col, .. }
+            | Stmt::Return { line, col, .. }
+            | Stmt::ExprStmt { line, col, .. } => (*line, *col),
+        };
         match s {
             Stmt::Let { name, value, .. } => {
                 self.gen_binding(name, value)?;
@@ -800,7 +831,7 @@ impl<'a> FnCodegen<'a> {
             }
             Stmt::Assign { name, value, .. } => {
                 if !self.vars.contains_key(name) {
-                    return Err(CodegenError(format!("Assignment to unknown variable '{name}'")));
+                    return Err(self.err(format!("Assignment to unknown variable '{name}'")));
                 }
                 self.gen_binding(name, value)?;
                 Ok(false)
@@ -960,15 +991,15 @@ impl<'a> FnCodegen<'a> {
         let name = match e {
             Expr::Ident(name) => name,
             _ => {
-                return Err(CodegenError(
+                return Err(self.err(
                     "kestrelc only supports indexing/passing a plain array variable so far".into(),
                 ))
             }
         };
         match self.vars.get(name) {
             Some(Slot::Array { ptr, len, .. }) => Ok((self.builder.use_var(*ptr), self.builder.use_var(*len))),
-            Some(Slot::Scalar(_)) => Err(CodegenError(format!("'{name}' is not an array"))),
-            None => Err(CodegenError(format!("Unknown identifier '{name}'"))),
+            Some(Slot::Scalar(_)) => Err(self.err(format!("'{name}' is not an array"))),
+            None => Err(self.err(format!("Unknown identifier '{name}'"))),
         }
     }
 
@@ -992,17 +1023,17 @@ impl<'a> FnCodegen<'a> {
         match e {
             Expr::Num(n) => Ok(self.builder.ins().iconst(types::I64, *n)),
             Expr::Bool(b) => Ok(self.builder.ins().iconst(types::I64, if *b { 1 } else { 0 })),
-            Expr::Str(_) => Err(CodegenError(
+            Expr::Str(_) => Err(self.err(
                 "kestrelc only supports string literals as direct print() arguments so far".into(),
             )),
             Expr::Ident(name) => match self.vars.get(name) {
                 Some(Slot::Scalar(var)) => Ok(self.builder.use_var(*var)),
-                Some(Slot::Array { .. }) => Err(CodegenError(format!(
+                Some(Slot::Array { .. }) => Err(self.err(format!(
                     "'{name}' is an array — it can only be indexed (arr[i]) or passed to a function, not used as a value directly"
                 ))),
-                None => Err(CodegenError(format!("Unknown identifier '{name}'"))),
+                None => Err(self.err(format!("Unknown identifier '{name}'"))),
             },
-            Expr::ArrayLit(_) => Err(CodegenError(
+            Expr::ArrayLit(_) => Err(self.err(
                 "kestrelc only supports array literals as the direct value of a `let`/assignment so far".into(),
             )),
             Expr::Index { target, index } => {
@@ -1013,7 +1044,7 @@ impl<'a> FnCodegen<'a> {
                 // needed either way.
                 if let (Expr::Num(n), Some(static_len)) = (index.as_ref(), self.static_array_len(target)) {
                     if *n < 0 || *n as usize >= static_len {
-                        return Err(CodegenError(format!(
+                        return Err(self.err(format!(
                             "index {n} is out of bounds for array of length {static_len} — proven at compile time, not deferred to a runtime check"
                         )));
                     }
@@ -1125,7 +1156,7 @@ impl<'a> FnCodegen<'a> {
                 let func_id = *self
                     .fn_ids
                     .get(name)
-                    .ok_or_else(|| CodegenError(format!("Unknown function '{name}'")))?;
+                    .ok_or_else(|| self.err(format!("Unknown function '{name}'")))?;
 
                 // If the callee has a recognized `where idx < N` clause,
                 // its precondition must be proven right here, at compile
@@ -1142,19 +1173,19 @@ impl<'a> FnCodegen<'a> {
                     let idx_lit = match idx_arg {
                         Expr::Num(n) => *n,
                         _ => {
-                            return Err(CodegenError(format!(
+                            return Err(self.err(format!(
                                 "kestrelc: can't prove '{name}''s `where {} < ...` clause here — the index argument must be a literal number so far",
                                 w.idx_param
                             )))
                         }
                     };
                     let arr_len = self.static_array_len(arr_arg).ok_or_else(|| {
-                        CodegenError(format!(
+                        self.err(format!(
                             "kestrelc: can't prove '{name}''s where clause here — the array argument must be a fixed-size array literal (`let x = [...]`) so far, not a parameter passed further down"
                         ))
                     })?;
                     if idx_lit < 0 || idx_lit as usize >= arr_len {
-                        return Err(CodegenError(format!(
+                        return Err(self.err(format!(
                             "kestrelc: call to '{name}' can't satisfy its own `where {} < N` clause — index {idx_lit} is out of bounds for an array of length {arr_len}",
                             w.idx_param
                         )));

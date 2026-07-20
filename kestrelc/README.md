@@ -90,10 +90,18 @@ the parser); `purity::check_purity`, `purity::check_parallel_map`, and
 values pinned to the statement they were found in, instead of bare
 strings. Honest scope: statement granularity, not full per-expression —
 `let x = f(a) + g(b);` points at the start of the `let`, not at
-whichever of `f(a)`/`g(b)` was actually the problem — and codegen
-errors (and every backend's runtime errors — unknown identifier,
-out-of-bounds index, etc.) still don't carry a source position at all.
-See `kestrel-DESIGN.md`'s roadmap for what's left.
+whichever of `f(a)`/`g(b)` was actually the problem.
+
+The native backend's own codegen errors (`codegen.rs`'s "kestrelc only
+supports X so far" / "Unknown identifier" / etc. — scope errors, not
+syntax errors) now carry a position too, but only a bare `line:col:`
+prefix, e.g. `kestrelc: 3:5: 'a' is an array — it can only be indexed...`
+— not the full `file:line:col:` + caret treatment above, since
+`codegen.rs` never has the original source text or filename threaded
+through it. Still open: the same for `wasm_codegen.rs`'s own errors, and
+every backend's runtime errors (unknown identifier, out-of-bounds
+index, etc.), which still don't carry a source position at all. See
+`kestrel-DESIGN.md`'s roadmap for what's left.
 
 ## Compile cache
 

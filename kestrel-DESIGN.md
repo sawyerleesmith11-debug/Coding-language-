@@ -402,10 +402,23 @@ the same `format_diagnostic` helper lex/parse errors already used — so
 `kestrelc` (native CLI, `--wasm`, and `kestrelc-web`) all get the real
 `file:line:col:` + caret treatment for purity, `parallel_map` misuse,
 and type errors too, at the same statement granularity as the JS
-backends. Runtime errors (unknown identifier, out-of-bounds index,
-etc.) and codegen-internal errors in every backend are still
-message-only, since they're not part of the AST-walking checkers this
-change touched.
+backends.
+
+Native `kestrelc`'s own codegen errors (`codegen.rs`'s "kestrelc only
+supports X so far" / "Unknown identifier" / "array variable rebound..."
+messages — the ones that fire when a program is syntactically fine but
+outside `kestrelc`'s current scope, per `kestrelc/README.md`'s Scope
+section) now carry a position too: `FnCodegen` tracks `cur_pos`, updated
+at the top of every `gen_stmt` call, and every user-facing error inside
+`FnCodegen` goes through a small `err()` helper that prefixes it with
+`line:col:`. Deliberately not the full `file:line:col:` + caret
+treatment above — `codegen.rs` never has the original source text or
+filename threaded through it, only line/col numbers, so a real caret
+line isn't buildable without a larger plumbing change; this is a
+smaller, honest step, not that one. Still open: the WASM backend's own
+codegen errors (`wasm_codegen.rs`), and runtime errors (unknown
+identifier, out-of-bounds index, etc.) in every backend, remain
+message-only.
 
 **Memoization, shipped (all backends, including native now):** both
 `run` and `runFast` cache a `pure fn`'s result by argument value, scoped
@@ -503,9 +516,11 @@ Not yet implemented (future work, roughly in priority order):
    the JS backends *and* `kestrelc`'s own checkers now (see above), get
    a real `file:line:col:` + caret, but pinned to the *statement*, not
    the exact sub-expression; going finer needs a span on every AST
-   node, not just statements. Still open: runtime errors (unknown
-   identifier, out-of-bounds index, etc.) and codegen-internal errors
-   in every backend are still message-only.
+   node, not just statements. Native `kestrelc`'s own codegen errors
+   also now carry a position (a bare `line:col:` prefix, not a full
+   caret — see above). Still open: the WASM backend's codegen errors,
+   and runtime errors (unknown identifier, out-of-bounds index, etc.)
+   in every backend, remain message-only.
 2. Memoization is now in all backends (see above), scoped down for the
    native one to scalar-only parameters and a 64-slot cap, and
    `parallel_map`-chain fusion is now in both — still open: generalizing
