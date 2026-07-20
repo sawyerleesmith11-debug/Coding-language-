@@ -50,8 +50,8 @@ fn expr_calls(e: &Expr, name: Symbol, found: &mut bool) {
     if *found {
         return;
     }
-    match e {
-        Expr::Call { name: n, args } => {
+    match &e.kind {
+        ExprKind::Call { name: n, args } => {
             if *n == name {
                 *found = true;
                 return;
@@ -60,21 +60,21 @@ fn expr_calls(e: &Expr, name: Symbol, found: &mut bool) {
                 expr_calls(a, name, found);
             }
         }
-        Expr::Unary { expr, .. } => expr_calls(expr, name, found),
-        Expr::Binop { left, right, .. } => {
+        ExprKind::Unary { expr, .. } => expr_calls(expr, name, found),
+        ExprKind::Binop { left, right, .. } => {
             expr_calls(left, name, found);
             expr_calls(right, name, found);
         }
-        Expr::Index { target, index } => {
+        ExprKind::Index { target, index } => {
             expr_calls(target, name, found);
             expr_calls(index, name, found);
         }
-        Expr::ArrayLit(elems) => {
+        ExprKind::ArrayLit(elems) => {
             for el in elems {
                 expr_calls(el, name, found);
             }
         }
-        Expr::Num(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Ident(_) => {}
+        ExprKind::Num(_) | ExprKind::Str(_) | ExprKind::Bool(_) | ExprKind::Ident(_) => {}
     }
 }
 
@@ -124,10 +124,12 @@ fn walk_stmts_exprs<'a>(stmts: &'a [Stmt], on_expr: &mut impl FnMut(&'a Expr)) {
 pub(crate) fn collect_parallel_map_callbacks(program: &Program) -> HashSet<Symbol> {
     let mut callbacks = HashSet::new();
     fn note_calls(e: &Expr, callbacks: &mut HashSet<Symbol>) {
-        if let Expr::Call { name, args } = e {
+        if let ExprKind::Call { name, args } = &e.kind {
             if &*name.resolve() == "parallel_map" {
-                if let Some(Expr::Ident(cb)) = args.first() {
-                    callbacks.insert(*cb);
+                if let Some(first) = args.first() {
+                    if let ExprKind::Ident(cb) = &first.kind {
+                        callbacks.insert(*cb);
+                    }
                 }
             }
             for a in args {
@@ -152,30 +154,41 @@ fn expression_body(f: &Fn) -> Option<&Expr> {
 }
 
 fn substitute(e: &Expr, subst: &HashMap<Symbol, &Expr>) -> Expr {
-    match e {
-        Expr::Ident(n) => subst.get(n).map(|v| (*v).clone()).unwrap_or_else(|| e.clone()),
-        Expr::Unary { op, expr } => Expr::Unary { op: *op, expr: Box::new(substitute(expr, subst)) },
-        Expr::Binop { op, left, right } => Expr::Binop {
-            op: *op,
-            left: Box::new(substitute(left, subst)),
-            right: Box::new(substitute(right, subst)),
-        },
-        Expr::Index { target, index } => Expr::Index {
-            target: Box::new(substitute(target, subst)),
-            index: Box::new(substitute(index, subst)),
-        },
-        Expr::Call { name, args } => Expr::Call {
-            name: *name,
-            args: args.iter().map(|a| substitute(a, subst)).collect(),
-        },
-        Expr::ArrayLit(elems) => Expr::ArrayLit(elems.iter().map(|e| substitute(e, subst)).collect()),
-        Expr::Num(_) | Expr::Str(_) | Expr::Bool(_) => e.clone(),
+    let span = e.span;
+    match &e.kind {
+        ExprKind::Ident(n) => subst.get(n).map(|v| (*v).clone()).unwrap_or_else(|| e.clone()),
+        ExprKind::Unary { op, expr } => Expr::new(ExprKind::Unary { op: *op, expr: Box::new(substitute(expr, subst)) }, span),
+        ExprKind::Binop { op, left, right } => Expr::new(
+            ExprKind::Binop {
+                op: *op,
+                left: Box::new(substitute(left, subst)),
+                right: Box::new(substitute(right, subst)),
+            },
+            span,
+        ),
+        ExprKind::Index { target, index } => Expr::new(
+            ExprKind::Index {
+                target: Box::new(substitute(target, subst)),
+                index: Box::new(substitute(index, subst)),
+            },
+            span,
+        ),
+        ExprKind::Call { name, args } => Expr::new(
+            ExprKind::Call {
+                name: *name,
+                args: args.iter().map(|a| substitute(a, subst)).collect(),
+            },
+            span,
+        ),
+        ExprKind::ArrayLit(elems) => Expr::new(ExprKind::ArrayLit(elems.iter().map(|e| substitute(e, subst)).collect()), span),
+        ExprKind::Num(_) | ExprKind::Str(_) | ExprKind::Bool(_) => e.clone(),
     }
 }
 
 fn inline_expr(e: &Expr, candidates: &HashMap<Symbol, Candidate>) -> Expr {
-    match e {
-        Expr::Call { name, args } => {
+    let span = e.span;
+    match &e.kind {
+        ExprKind::Call { name, args } => {
             let new_args: Vec<Expr> = args.iter().map(|a| inline_expr(a, candidates)).collect();
             if let Some(c) = candidates.get(name) {
                 if c.params.len() == new_args.len() {
@@ -184,20 +197,26 @@ fn inline_expr(e: &Expr, candidates: &HashMap<Symbol, Candidate>) -> Expr {
                     return substitute(&c.body, &subst);
                 }
             }
-            Expr::Call { name: *name, args: new_args }
+            Expr::new(ExprKind::Call { name: *name, args: new_args }, span)
         }
-        Expr::Unary { op, expr } => Expr::Unary { op: *op, expr: Box::new(inline_expr(expr, candidates)) },
-        Expr::Binop { op, left, right } => Expr::Binop {
-            op: *op,
-            left: Box::new(inline_expr(left, candidates)),
-            right: Box::new(inline_expr(right, candidates)),
-        },
-        Expr::Index { target, index } => Expr::Index {
-            target: Box::new(inline_expr(target, candidates)),
-            index: Box::new(inline_expr(index, candidates)),
-        },
-        Expr::ArrayLit(elems) => Expr::ArrayLit(elems.iter().map(|e| inline_expr(e, candidates)).collect()),
-        Expr::Num(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Ident(_) => e.clone(),
+        ExprKind::Unary { op, expr } => Expr::new(ExprKind::Unary { op: *op, expr: Box::new(inline_expr(expr, candidates)) }, span),
+        ExprKind::Binop { op, left, right } => Expr::new(
+            ExprKind::Binop {
+                op: *op,
+                left: Box::new(inline_expr(left, candidates)),
+                right: Box::new(inline_expr(right, candidates)),
+            },
+            span,
+        ),
+        ExprKind::Index { target, index } => Expr::new(
+            ExprKind::Index {
+                target: Box::new(inline_expr(target, candidates)),
+                index: Box::new(inline_expr(index, candidates)),
+            },
+            span,
+        ),
+        ExprKind::ArrayLit(elems) => Expr::new(ExprKind::ArrayLit(elems.iter().map(|e| inline_expr(e, candidates)).collect()), span),
+        ExprKind::Num(_) | ExprKind::Str(_) | ExprKind::Bool(_) | ExprKind::Ident(_) => e.clone(),
     }
 }
 

@@ -39,8 +39,8 @@ pub fn check_purity(program: &Program, fns: &HashMap<Symbol, &Fn>) -> Vec<Kestre
             if *impure {
                 return;
             }
-            match e {
-                Expr::Call { name, args } => {
+            match &e.kind {
+                ExprKind::Call { name, args } => {
                     if let Some(callee) = fns.get(name) {
                         if !callee.pure {
                             *impure = true;
@@ -55,16 +55,16 @@ pub fn check_purity(program: &Program, fns: &HashMap<Symbol, &Fn>) -> Vec<Kestre
                         visit_expr(a, fns, cache, stack, impure);
                     }
                 }
-                Expr::Binop { left, right, .. } => {
+                ExprKind::Binop { left, right, .. } => {
                     visit_expr(left, fns, cache, stack, impure);
                     visit_expr(right, fns, cache, stack, impure);
                 }
-                Expr::Unary { expr, .. } => visit_expr(expr, fns, cache, stack, impure),
-                Expr::Index { target, index } => {
+                ExprKind::Unary { expr, .. } => visit_expr(expr, fns, cache, stack, impure),
+                ExprKind::Index { target, index } => {
                     visit_expr(target, fns, cache, stack, impure);
                     visit_expr(index, fns, cache, stack, impure);
                 }
-                Expr::ArrayLit(elems) => {
+                ExprKind::ArrayLit(elems) => {
                     for el in elems {
                         visit_expr(el, fns, cache, stack, impure);
                     }
@@ -172,8 +172,8 @@ pub fn check_parallel_map(program: &Program, fns: &HashMap<Symbol, &Fn>) -> Vec<
         let push = |errors: &mut Vec<KestrelcError>, message: String| {
             errors.push(KestrelcError::new(ErrorKind::ParallelMap, message, span));
         };
-        match e {
-            Expr::Call { name, args } if &*name.resolve() == "parallel_map" => {
+        match &e.kind {
+            ExprKind::Call { name, args } if &*name.resolve() == "parallel_map" => {
                 if args.len() != 2 {
                     push(errors, format!(
                         "parallel_map() takes exactly 2 arguments (a pure function and an array), got {}",
@@ -181,8 +181,8 @@ pub fn check_parallel_map(program: &Program, fns: &HashMap<Symbol, &Fn>) -> Vec<
                     ));
                     return;
                 }
-                match &args[0] {
-                    Expr::Ident(func_name) => match fns.get(func_name) {
+                match &args[0].kind {
+                    ExprKind::Ident(func_name) => match fns.get(func_name) {
                         None => push(errors, format!("parallel_map(): unknown function '{func_name}'")),
                         Some(callee) if !callee.pure => push(errors, format!(
                             "parallel_map(): '{func_name}' must be a 'pure fn' — parallel safety comes entirely from the purity proof"
@@ -202,21 +202,21 @@ pub fn check_parallel_map(program: &Program, fns: &HashMap<Symbol, &Fn>) -> Vec<
                 }
                 visit_expr(&args[1], fns, span, errors);
             }
-            Expr::Call { args, .. } => {
+            ExprKind::Call { args, .. } => {
                 for a in args {
                     visit_expr(a, fns, span, errors);
                 }
             }
-            Expr::Binop { left, right, .. } => {
+            ExprKind::Binop { left, right, .. } => {
                 visit_expr(left, fns, span, errors);
                 visit_expr(right, fns, span, errors);
             }
-            Expr::Unary { expr, .. } => visit_expr(expr, fns, span, errors),
-            Expr::Index { target, index } => {
+            ExprKind::Unary { expr, .. } => visit_expr(expr, fns, span, errors),
+            ExprKind::Index { target, index } => {
                 visit_expr(target, fns, span, errors);
                 visit_expr(index, fns, span, errors);
             }
-            Expr::ArrayLit(elems) => {
+            ExprKind::ArrayLit(elems) => {
                 for el in elems {
                     visit_expr(el, fns, span, errors);
                 }

@@ -23,16 +23,16 @@ pub struct WhereInfo {
 
 pub fn extract_where_info(f: &Fn) -> Option<WhereInfo> {
     let cond = f.where_clause.as_ref()?;
-    let (left, right) = match cond {
-        Expr::Binop { op: BinOp::Lt, left, right } => (left, right),
+    let (left, right) = match &cond.kind {
+        ExprKind::Binop { op: BinOp::Lt, left, right } => (left, right),
         _ => return None,
     };
-    let idx_param = match left.as_ref() {
-        Expr::Ident(n) => n.clone(),
+    let idx_param = match &left.as_ref().kind {
+        ExprKind::Ident(n) => n.clone(),
         _ => return None,
     };
-    let n_name = match right.as_ref() {
-        Expr::Ident(n) => n.clone(),
+    let n_name = match &right.as_ref().kind {
+        ExprKind::Ident(n) => n.clone(),
         _ => return None,
     };
     let idx_pos = f.params.iter().position(|p| p.name == idx_param && matches!(p.ty, Type::Named(_)))?;

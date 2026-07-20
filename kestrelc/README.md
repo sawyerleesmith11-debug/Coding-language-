@@ -108,11 +108,17 @@ same type main.rs already knows how to render, both codegen backends
 get the exact same full `file:line:col:` + caret treatment as everything
 else, for free.
 
-Honest scope: statement granularity everywhere, not full
-per-expression — `let x = f(a) + g(b);` points at the start of the
-`let`, not at whichever of `f(a)`/`g(b)` was actually the problem — and
-every backend's runtime errors (unknown identifier, out-of-bounds
-index, etc.) still don't carry a source position at all. See
+Every `Expr` node (not just `Stmt`) now carries its own `Span` too
+(`ast.rs` — `Expr` is a small `{ kind: ExprKind, span: Span }` wrapper),
+so a checker *can* point at the exact sub-expression instead of just the
+enclosing statement. `resolve.rs`'s "Unknown identifier"/"Unknown
+function" errors are wired up to do exactly that — `print(a, b, bogus,
+c)` points at `bogus` itself. Most other checkers (`purity.rs`,
+`typecheck.rs`) still report at statement granularity for now — the
+`Span` is sitting right there on every sub-expression, just not read yet
+at most of those call sites. Every backend's runtime errors (unknown
+identifier, out-of-bounds index, etc.) still don't carry a source
+position at all — a compile-time-only pass can't help there. See
 `kestrel-DESIGN.md`'s roadmap for what's left.
 
 ## Name resolution

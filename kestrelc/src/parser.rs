@@ -116,22 +116,23 @@ impl Parser {
 
     fn parse_primary(&mut self) -> PResult<Expr> {
         let t = self.peek().clone();
+        let span = t.span;
         match t.tok {
             Tok::Number(n) => {
                 self.advance();
-                Ok(Expr::Num(n))
+                Ok(Expr::new(ExprKind::Num(n), span))
             }
             Tok::Str(s) => {
                 self.advance();
-                Ok(Expr::Str(s))
+                Ok(Expr::new(ExprKind::Str(s), span))
             }
             Tok::True => {
                 self.advance();
-                Ok(Expr::Bool(true))
+                Ok(Expr::new(ExprKind::Bool(true), span))
             }
             Tok::False => {
                 self.advance();
-                Ok(Expr::Bool(false))
+                Ok(Expr::new(ExprKind::Bool(false), span))
             }
             Tok::LBracket => {
                 self.advance();
@@ -147,7 +148,7 @@ impl Parser {
                     }
                 }
                 self.expect(Tok::RBracket)?;
-                Ok(Expr::ArrayLit(elems))
+                Ok(Expr::new(ExprKind::ArrayLit(elems), span))
             }
             Tok::LParen => {
                 self.advance();
@@ -157,7 +158,7 @@ impl Parser {
             }
             Tok::Ident(name) => {
                 self.advance();
-                Ok(Expr::Ident(name))
+                Ok(Expr::new(ExprKind::Ident(name), span))
             }
             other => Err(KestrelcError::new(
                 ErrorKind::Parse,
@@ -168,20 +169,21 @@ impl Parser {
     }
 
     fn parse_postfix(&mut self) -> PResult<Expr> {
+        let span = self.peek().span;
         let mut expr = self.parse_primary()?;
         loop {
             if self.at(&Tok::LBracket) {
                 self.advance();
                 let index = self.parse_expr()?;
                 self.expect(Tok::RBracket)?;
-                expr = Expr::Index { target: Box::new(expr), index: Box::new(index) };
+                expr = Expr::new(ExprKind::Index { target: Box::new(expr), index: Box::new(index) }, span);
             } else if self.at(&Tok::LParen) {
-                if let Expr::Ident(name) = &expr {
+                if let ExprKind::Ident(name) = &expr.kind {
                     let name = name.clone();
                     self.advance();
                     let args = self.parse_args()?;
                     self.expect(Tok::RParen)?;
-                    expr = Expr::Call { name, args };
+                    expr = Expr::new(ExprKind::Call { name, args }, span);
                 } else {
                     break;
                 }
@@ -194,17 +196,20 @@ impl Parser {
 
     fn parse_unary(&mut self) -> PResult<Expr> {
         if self.at(&Tok::Minus) {
+            let span = self.peek().span;
             self.advance();
-            return Ok(Expr::Unary { op: UnOp::Neg, expr: Box::new(self.parse_unary()?) });
+            return Ok(Expr::new(ExprKind::Unary { op: UnOp::Neg, expr: Box::new(self.parse_unary()?) }, span));
         }
         if self.at(&Tok::Bang) {
+            let span = self.peek().span;
             self.advance();
-            return Ok(Expr::Unary { op: UnOp::Not, expr: Box::new(self.parse_unary()?) });
+            return Ok(Expr::new(ExprKind::Unary { op: UnOp::Not, expr: Box::new(self.parse_unary()?) }, span));
         }
         self.parse_postfix()
     }
 
     fn parse_term(&mut self) -> PResult<Expr> {
+        let span = self.peek().span;
         let mut left = self.parse_unary()?;
         loop {
             let op = match self.peek().tok {
@@ -215,12 +220,13 @@ impl Parser {
             };
             self.advance();
             let right = self.parse_unary()?;
-            left = Expr::Binop { op, left: Box::new(left), right: Box::new(right) };
+            left = Expr::new(ExprKind::Binop { op, left: Box::new(left), right: Box::new(right) }, span);
         }
         Ok(left)
     }
 
     fn parse_additive(&mut self) -> PResult<Expr> {
+        let span = self.peek().span;
         let mut left = self.parse_term()?;
         loop {
             let op = match self.peek().tok {
@@ -230,12 +236,13 @@ impl Parser {
             };
             self.advance();
             let right = self.parse_term()?;
-            left = Expr::Binop { op, left: Box::new(left), right: Box::new(right) };
+            left = Expr::new(ExprKind::Binop { op, left: Box::new(left), right: Box::new(right) }, span);
         }
         Ok(left)
     }
 
     fn parse_comparison(&mut self) -> PResult<Expr> {
+        let span = self.peek().span;
         let mut left = self.parse_additive()?;
         loop {
             let op = match self.peek().tok {
@@ -249,12 +256,13 @@ impl Parser {
             };
             self.advance();
             let right = self.parse_additive()?;
-            left = Expr::Binop { op, left: Box::new(left), right: Box::new(right) };
+            left = Expr::new(ExprKind::Binop { op, left: Box::new(left), right: Box::new(right) }, span);
         }
         Ok(left)
     }
 
     fn parse_expr(&mut self) -> PResult<Expr> {
+        let span = self.peek().span;
         let mut left = self.parse_comparison()?;
         loop {
             let op = match self.peek().tok {
@@ -264,7 +272,7 @@ impl Parser {
             };
             self.advance();
             let right = self.parse_comparison()?;
-            left = Expr::Binop { op, left: Box::new(left), right: Box::new(right) };
+            left = Expr::new(ExprKind::Binop { op, left: Box::new(left), right: Box::new(right) }, span);
         }
         Ok(left)
     }

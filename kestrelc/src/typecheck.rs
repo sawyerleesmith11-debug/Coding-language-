@@ -83,18 +83,18 @@ pub fn check_types(program: &Program, fns: &HashMap<Symbol, &Fn>) -> Vec<Kestrel
         let push = |errors: &mut Vec<KestrelcError>, message: String| {
             errors.push(KestrelcError::new(ErrorKind::Type, message, span));
         };
-        match e {
-            Expr::Num(_) => Kind::Int,
-            Expr::Bool(_) => Kind::Bool,
-            Expr::Str(_) => Kind::Str,
-            Expr::Ident(name) => locals.get(name).copied().unwrap_or(Kind::Unknown),
-            Expr::ArrayLit(elems) => {
+        match &e.kind {
+            ExprKind::Num(_) => Kind::Int,
+            ExprKind::Bool(_) => Kind::Bool,
+            ExprKind::Str(_) => Kind::Str,
+            ExprKind::Ident(name) => locals.get(name).copied().unwrap_or(Kind::Unknown),
+            ExprKind::ArrayLit(elems) => {
                 for el in elems {
                     infer_expr(el, locals, fns, span, errors);
                 }
                 Kind::Array
             }
-            Expr::Index { target, index } => {
+            ExprKind::Index { target, index } => {
                 infer_expr(target, locals, fns, span, errors);
                 let idx_kind = infer_expr(index, locals, fns, span, errors);
                 if idx_kind != Kind::Unknown && idx_kind != Kind::Int {
@@ -102,7 +102,7 @@ pub fn check_types(program: &Program, fns: &HashMap<Symbol, &Fn>) -> Vec<Kestrel
                 }
                 Kind::Int // Kestrel arrays are integer-valued so far
             }
-            Expr::Unary { op, expr } => {
+            ExprKind::Unary { op, expr } => {
                 let k = infer_expr(expr, locals, fns, span, errors);
                 match op {
                     UnOp::Neg => {
@@ -119,7 +119,7 @@ pub fn check_types(program: &Program, fns: &HashMap<Symbol, &Fn>) -> Vec<Kestrel
                     }
                 }
             }
-            Expr::Binop { op, left, right } => {
+            ExprKind::Binop { op, left, right } => {
                 let l = infer_expr(left, locals, fns, span, errors);
                 let r = infer_expr(right, locals, fns, span, errors);
                 let sym = op_symbol(*op);
@@ -150,7 +150,7 @@ pub fn check_types(program: &Program, fns: &HashMap<Symbol, &Fn>) -> Vec<Kestrel
                     }
                 }
             }
-            Expr::Call { name, args } => {
+            ExprKind::Call { name, args } => {
                 if &*name.resolve() == "parallel_map" {
                     // Already validated by check_parallel_map; just infer the array arg.
                     if args.len() == 2 {

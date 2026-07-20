@@ -169,11 +169,11 @@ enum VarLoc {
 // yet (rejected with a clear error at codegen time, once `resolve_array`
 // runs — see `gen_binding`'s parallel_map arm).
 fn slot_kind_for_let(value: &Expr, known_lens: &HashMap<Symbol, u32>) -> SlotKind {
-    match value {
-        Expr::ArrayLit(elems) => SlotKind::Array { literal_len: Some(elems.len() as u32) },
-        Expr::Call { name, args } if &*name.resolve() == "parallel_map" && args.len() == 2 => {
-            let len = match &args[1] {
-                Expr::Ident(arr_name) => known_lens.get(arr_name).copied(),
+    match &value.kind {
+        ExprKind::ArrayLit(elems) => SlotKind::Array { literal_len: Some(elems.len() as u32) },
+        ExprKind::Call { name, args } if &*name.resolve() == "parallel_map" && args.len() == 2 => {
+            let len = match &args[1].kind {
+                ExprKind::Ident(arr_name) => known_lens.get(arr_name).copied(),
                 _ => None,
             };
             SlotKind::Array { literal_len: len }
@@ -340,14 +340,14 @@ impl<'a> FnWasm<'a> {
     /// the scalar case and the array-literal case (bump-allocate, one
     /// store per element, then set the ptr/len locals).
     fn gen_binding(&mut self, name: Symbol, value: &Expr) -> WResult<()> {
-        match (&self.vars[&name], value) {
+        match (&self.vars[&name], &value.kind) {
             (VarLoc::Scalar(idx), _) => {
                 let idx = *idx;
                 self.gen_expr(value)?;
                 self.func.instructions().local_set(idx);
                 Ok(())
             }
-            (VarLoc::Array { ptr, len, literal_len }, Expr::ArrayLit(elems)) => {
+            (VarLoc::Array { ptr, len, literal_len }, ExprKind::ArrayLit(elems)) => {
                 let (ptr, len) = (*ptr, *len);
                 let expected = literal_len.expect("array let-bindings always have a literal_len");
                 if elems.len() as u32 != expected {
@@ -373,10 +373,10 @@ impl<'a> FnWasm<'a> {
                 self.func.instructions().local_set(len);
                 Ok(())
             }
-            (VarLoc::Array { ptr, len, literal_len }, Expr::Call { name: call_name, args }) if &*call_name.resolve() == "parallel_map" => {
+            (VarLoc::Array { ptr, len, literal_len }, ExprKind::Call { name: call_name, args }) if &*call_name.resolve() == "parallel_map" => {
                 let (ptr, len) = (*ptr, *len);
-                let func_name = match &args[0] {
-                    Expr::Ident(n) => *n,
+                let func_name = match &args[0].kind {
+                    ExprKind::Ident(n) => *n,
                     _ => return Err(self.err(
                         "parallel_map()'s first argument must be a bare function name".into(),
                     )),
@@ -543,14 +543,14 @@ impl<'a> FnWasm<'a> {
         }
         for (i, arg) in args.iter().enumerate() {
             let is_last = if i == args.len() - 1 { 1 } else { 0 };
-            match arg {
-                Expr::Str(s) => {
+            match &arg.kind {
+                ExprKind::Str(s) => {
                     let (offset, len) = self.intern_str(&s.resolve());
                     self.func.instructions().i32_const(offset as i32).i32_const(len as i32).i32_const(is_last);
                     self.func.instructions().call(IMPORT_PRINT_STR);
                 }
-                other => {
-                    self.gen_expr(other)?;
+                _ => {
+                    self.gen_expr(arg)?;
                     self.func.instructions().i32_const(is_last);
                     self.func.instructions().call(IMPORT_PRINT_I64);
                 }
@@ -564,8 +564,8 @@ impl<'a> FnWasm<'a> {
     /// compile-time-known length). Used only to decide whether a bounds
     /// check can be proven/elided at compile time.
     fn static_array_len(&self, e: &Expr) -> Option<u32> {
-        match e {
-            Expr::Ident(name) => match self.vars.get(name) {
+        match &e.kind {
+            ExprKind::Ident(name) => match self.vars.get(name) {
                 Some(VarLoc::Array { literal_len, .. }) => *literal_len,
                 _ => None,
             },
@@ -577,8 +577,8 @@ impl<'a> FnWasm<'a> {
     /// local indices. Scope for now: only a plain identifier naming an
     /// array local/parameter, matching the native backend.
     fn resolve_array(&self, e: &Expr) -> WResult<(u32, u32)> {
-        let name = match e {
-            Expr::Ident(name) => name,
+        let name = match &e.kind {
+            ExprKind::Ident(name) => name,
             _ => {
                 return Err(self.err(
                     "kestrelc only supports indexing/passing a plain array variable so far".into(),
@@ -593,19 +593,19 @@ impl<'a> FnWasm<'a> {
     }
 
     fn gen_expr(&mut self, e: &Expr) -> WResult<()> {
-        match e {
-            Expr::Num(n) => {
+        match &e.kind {
+            ExprKind::Num(n) => {
                 self.func.instructions().i64_const(*n);
                 Ok(())
             }
-            Expr::Bool(b) => {
+            ExprKind::Bool(b) => {
                 self.func.instructions().i64_const(if *b { 1 } else { 0 });
                 Ok(())
             }
-            Expr::Str(_) => Err(self.err(
+            ExprKind::Str(_) => Err(self.err(
                 "kestrelc's WASM backend only supports string literals as direct print() arguments so far".into(),
             )),
-            Expr::Ident(name) => match self.vars.get(name) {
+            ExprKind::Ident(name) => match self.vars.get(name) {
                 Some(VarLoc::Scalar(idx)) => {
                     self.func.instructions().local_get(*idx);
                     Ok(())
@@ -615,16 +615,16 @@ impl<'a> FnWasm<'a> {
                 ))),
                 None => Err(self.err(format!("Unknown identifier '{name}'"))),
             },
-            Expr::ArrayLit(_) => Err(self.err(
+            ExprKind::ArrayLit(_) => Err(self.err(
                 "kestrelc only supports array literals as the direct value of a `let`/assignment so far".into(),
             )),
-            Expr::Index { target, index } => {
+            ExprKind::Index { target, index } => {
                 // Proof-carrying fast path #1: a literal index into an
                 // array whose length is also known at compile time (a
                 // `let` literal, not a parameter) is proven safe — or
                 // proven *unsafe* — right now, with no runtime check
                 // either way.
-                if let (Expr::Num(n), Some(static_len)) = (index.as_ref(), self.static_array_len(target)) {
+                if let (ExprKind::Num(n), Some(static_len)) = (&index.as_ref().kind, self.static_array_len(target)) {
                     if *n < 0 || *n as u32 >= static_len {
                         return Err(self.err(format!(
                             "index {n} is out of bounds for array of length {static_len} — proven at compile time, not deferred to a runtime check"
@@ -647,7 +647,7 @@ impl<'a> FnWasm<'a> {
                 // precondition is already guaranteed and the check would
                 // be redundant. Same logic as the native backend's
                 // identical fast path in codegen.rs.
-                if let (Expr::Ident(t), Expr::Ident(i)) = (target.as_ref(), index.as_ref()) {
+                if let (ExprKind::Ident(t), ExprKind::Ident(i)) = (&target.as_ref().kind, &index.as_ref().kind) {
                     if let Some(w) = self.my_where {
                         if t == &w.arr_param && i == &w.idx_param {
                             let (ptr, _len) = self.resolve_array(target)?;
@@ -716,7 +716,7 @@ impl<'a> FnWasm<'a> {
                 self.func.instructions().i64_load(MemArg { offset: 0, align: 3, memory_index: 0 });
                 Ok(())
             }
-            Expr::Unary { op, expr } => {
+            ExprKind::Unary { op, expr } => {
                 self.gen_expr(expr)?;
                 match op {
                     UnOp::Neg => {
@@ -728,7 +728,7 @@ impl<'a> FnWasm<'a> {
                 }
                 Ok(())
             }
-            Expr::Binop { op, left, right } => {
+            ExprKind::Binop { op, left, right } => {
                 self.gen_expr(left)?;
                 self.gen_expr(right)?;
                 let ins = &mut self.func.instructions();
@@ -750,7 +750,7 @@ impl<'a> FnWasm<'a> {
                 }
                 Ok(())
             }
-            Expr::Call { name, args } => {
+            ExprKind::Call { name, args } => {
                 let idx = *self
                     .fn_indices
                     .get(name)
@@ -767,8 +767,8 @@ impl<'a> FnWasm<'a> {
                 if let Some(w) = self.where_info.get(name) {
                     let idx_arg = &args[w.idx_pos];
                     let arr_arg = &args[w.arr_pos];
-                    let idx_lit = match idx_arg {
-                        Expr::Num(n) => *n,
+                    let idx_lit = match &idx_arg.kind {
+                        ExprKind::Num(n) => *n,
                         _ => {
                             return Err(self.err(format!(
                                 "kestrelc: can't prove '{name}''s `where {} < ...` clause here — the index argument must be a literal number so far",
@@ -791,7 +791,7 @@ impl<'a> FnWasm<'a> {
 
                 for a in args {
                     let is_array_ident =
-                        matches!(a, Expr::Ident(n) if matches!(self.vars.get(n), Some(VarLoc::Array { .. })));
+                        matches!(&a.kind, ExprKind::Ident(n) if matches!(self.vars.get(n), Some(VarLoc::Array { .. })));
                     if is_array_ident {
                         let (ptr, len) = self.resolve_array(a)?;
                         self.func.instructions().local_get(ptr);
