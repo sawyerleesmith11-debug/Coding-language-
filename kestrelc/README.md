@@ -354,18 +354,32 @@ because the exclusion guarantees it's never touched from more than one
 OS thread — `parallel_map`'s worker threads are the only way a Kestrel
 function ever runs concurrently, and any function that could be called
 that way is compiled unmemoized instead. Eligible functions get a
-compile-time-assigned "slot" (capped at 64 per program — a function
-past the cap just compiles unmemoized, not an error); each slot is a
-real open-addressing hash table (linear probing, grown at load factor
-0.5), so lookup/insert stays average O(1) no matter how many distinct
-argument lists a function has been called with. (It started as a plain
-linear-scan array — fine for a handful of calls, but a hot function
-called with many *distinct* arguments made that go quadratic overall; a
-5,000,000-call benchmark exposed it hanging for minutes before the fix
-— see `examples/bench_loop.kes` and its regression test in
+compile-time-assigned "slot"; each slot is a real open-addressing hash
+table (linear probing, grown at load factor 0.5), so lookup/insert stays
+average O(1) no matter how many distinct argument lists a function has
+been called with. (It started as a plain linear-scan array — fine for a
+handful of calls, but a hot function called with many *distinct*
+arguments made that go quadratic overall; a 5,000,000-call benchmark
+exposed it hanging for minutes before the fix — see
+`examples/bench_loop.kes` and its regression test in
 `tests/integration.rs`.) Recursive functions memoize correctly too
 (each recursive call is a normal lookup-or-compute-and-store against
 the same slot).
+
+Eligible functions used to be capped at 64 slots per program — a
+function past the cap just compiled unmemoized, silently, no error —
+because `kestrelc_runtime.c` kept the outer per-function table as a
+fixed-size 64-entry array. That cap is gone: the outer table
+(`kestrelc_memo_tables`/`_counts`/`_caps`) now grows on demand (doubling,
+same as each slot's own hash table already did), so a program with any
+number of eligible pure fns memoizes all of them. Still scoped down from
+the JS backends' version in one way, unchanged: only functions with
+*scalar* (no array) parameters are eligible — arrays would need
+per-element hashing (correctness matters here, not just perf: a naive
+pointer-based hash would risk a false cache hit if two calls' array
+arguments happened to reuse the same stack address, since array
+arguments are always caller-owned stack memory, not heap-allocated) that
+this pass still doesn't implement.
 
 ## Benchmarks
 

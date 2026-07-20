@@ -1475,6 +1475,62 @@ fn a_memoized_function_called_with_many_distinct_arguments_stays_fast_and_correc
     assert_eq!(native_stdout(&run), "648033478\n");
 }
 
+#[test]
+fn the_71st_eligible_pure_fn_still_gets_memoized_past_the_old_64_slot_cap() {
+    // Regression test: codegen.rs used to stop assigning memo slots
+    // after MEMO_MAX_SLOTS (64) eligible functions — everything past the
+    // cap compiled fine but silently ran unmemoized, with no error and
+    // no way to notice short of a timing difference. kestrelc_runtime.c's
+    // outer slot table (kestrelc_memo_tables/_counts/_caps) now grows on
+    // demand instead of being a fixed 64-entry array. This builds a
+    // program with 70 trivial eligible pure fns declared before `slow` —
+    // so `slow` is assigned slot 70, well past the old cap — then calls
+    // `slow(46)`, naive doubly-recursive fibonacci. A single call is
+    // enough to prove the slot works: `slow`'s own recursive sub-calls
+    // go through the same memoized call path as any other call to it, so
+    // if slot 70 doesn't actually work, this doesn't just run somewhat
+    // slower — naive fib(46) is ~3.7 billion recursive calls, several
+    // seconds at minimum even for cheap native calls, vs comfortably
+    // under a second memoized (see the memoized recursive fib test above
+    // for the un-capped version of this same effect, and
+    // kestrel-DESIGN.md's measured fib(32) numbers for the general
+    // magnitude memoizing naive recursion buys).
+    let scratch = scratch_dir("memo_past_old_slot_cap");
+    let src_path = scratch.join("prog.kes");
+    let mut src = String::new();
+    for i in 0..70 {
+        src.push_str(&format!("pure fn dummy{i}(x: i64) -> i64 {{ return x + {i}; }}\n"));
+    }
+    src.push_str(
+        "pure fn slow(n: i64) -> i64 {\n\
+         \x20   if (n < 2) { return n; }\n\
+         \x20   return slow(n - 1) + slow(n - 2);\n\
+         }\n\
+         fn main() {\n\
+         \x20   print(slow(46));\n\
+         }\n",
+    );
+    fs::write(&src_path, &src).unwrap();
+
+    let out = Command::new(kestrelc_bin())
+        .arg(&src_path)
+        .current_dir(&scratch)
+        .output()
+        .expect("failed to run kestrelc");
+    assert!(out.status.success(), "compile failed:\n{}", String::from_utf8_lossy(&out.stderr));
+
+    let bin = scratch.join("prog");
+    let start = std::time::Instant::now();
+    let run = Command::new(&bin).output().expect("failed to run compiled binary");
+    let elapsed = start.elapsed();
+    assert!(run.status.success(), "compiled binary exited with failure");
+    assert!(
+        elapsed.as_secs() < 5,
+        "slow(46) took {elapsed:?} — looks like the 71st eligible fn (slot past the old 64-slot cap) isn't being memoized"
+    );
+    assert_eq!(native_stdout(&run), "1836311903\n");
+}
+
 // ==================== codegen error positions ====================
 
 #[test]

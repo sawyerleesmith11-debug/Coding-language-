@@ -601,11 +601,27 @@ Not yet implemented (future work, roughly in priority order):
    exact sub-expression; going finer needs a span on every AST node,
    not just statements. Still open: runtime errors (unknown identifier,
    out-of-bounds index, etc.) in every backend remain message-only.
-2. Memoization is now in all backends (see above), scoped down for the
-   native one to scalar-only parameters and a 64-slot cap, and
-   `parallel_map`-chain fusion is now in both — still open: generalizing
-   fusion beyond the current narrow adjacent-`let` shape, and lifting
-   native memoization's scalar-only/64-slot limits.
+2. Memoization is now in all backends (see above); `parallel_map`-chain
+   fusion is now in both — still open: generalizing fusion beyond the
+   current narrow adjacent-`let` shape. Native memoization's 64-slot cap
+   is gone (`kestrelc_runtime.c`'s outer per-function table grows on
+   demand now, same doubling-growth idea as each slot's own hash table
+   already had) — see `tests/integration.rs`'s
+   `the_71st_eligible_pure_fn_still_gets_memoized_past_the_old_64_slot_cap`.
+   Still open: the scalar-only parameter restriction. Lifting it turned
+   out to be a meaningfully bigger change than the slot cap was, not
+   just a bigger constant — kestrelc requires an array argument to be a
+   literal-length `let` at the call site, but the *callee*'s own
+   parameter type (`[T; N]`) is generic over `N`, a symbolic bound, not
+   a fixed compile-time length; the same memoized function can
+   legitimately be called with different-length arrays from different
+   call sites. Flattening an array argument into the memo cache's flat
+   `i64` buffer (the only sound way to hash/compare by content instead
+   of by pointer — see the README's memoization section for why a raw
+   pointer compare would be an actual correctness bug, not just a
+   missed cache hit) needs a real runtime-length copy loop emitted in
+   Cranelift IR, since the element count isn't known until the function
+   is actually entered. Scoped out of this round rather than rushed.
 3. Proof-based bounds-check *elision* in `kestrelc` — **the design
    doc's own `get_safe` example now works exactly as originally
    specified**: `where i < N` is proven at every call site (a literal

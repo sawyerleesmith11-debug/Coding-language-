@@ -258,14 +258,21 @@ void kestrelc_profile_record(const char* path, long long path_len, const char* n
 // cleanly. A hash table keeps each lookup/insert average O(1)
 // regardless of how many distinct argument lists a function has seen.
 //
-// Fixed-size slot table, not a dynamic map of tables: kestrelc assigns
-// slots sequentially per compiled program and never exceeds
-// KESTRELC_MEMO_MAX_SLOTS (see codegen.rs) — a plain array indexed by
-// slot is simplest for a compiler this scoped; only the per-slot table
-// itself needed to become a real hash table.
-#define KESTRELC_MEMO_MAX_SLOTS 64
+// kestrelc used to cap eligible functions at KESTRELC_MEMO_MAX_SLOTS
+// (64) via a fixed-size outer array indexed by slot — simplest thing
+// that worked at first, but a program with more than 64 eligible pure
+// fns just silently stopped memoizing past the cap, no error, easy to
+// not notice. The outer table is now grown on demand instead (see
+// kestrelc_memo_ensure_slot_capacity below), same "always an
+// optimization, never a hard limit" posture the per-slot hash tables
+// already have. Memoized functions are, by construction (see
+// codegen.rs's eligibility check — excludes anything ever passed as a
+// parallel_map callback), only ever called from the single thread that
+// calls them directly, so growing the outer table needs no locking
+// either, same as everything else here.
 #define KESTRELC_MEMO_MAX_ARGS 4
 #define KESTRELC_MEMO_INITIAL_CAP 16 // must be a power of 2
+#define KESTRELC_MEMO_INITIAL_SLOT_CAPACITY 16
 
 typedef struct {
     long long args[KESTRELC_MEMO_MAX_ARGS];
@@ -274,9 +281,52 @@ typedef struct {
     int occupied; // 0 = empty slot in the open-addressing table
 } kestrelc_memo_entry;
 
-static kestrelc_memo_entry* kestrelc_memo_tables[KESTRELC_MEMO_MAX_SLOTS];
-static int kestrelc_memo_counts[KESTRELC_MEMO_MAX_SLOTS]; // occupied entries
-static int kestrelc_memo_caps[KESTRELC_MEMO_MAX_SLOTS]; // always a power of 2
+static kestrelc_memo_entry** kestrelc_memo_tables = NULL; // kestrelc_memo_slot_capacity pointers, each NULL until first grown
+static int* kestrelc_memo_counts = NULL; // occupied entries, one per slot
+static int* kestrelc_memo_caps = NULL; // each slot's table capacity, always a power of 2 (0 = not yet allocated)
+static int kestrelc_memo_slot_capacity = 0; // length of the three arrays above
+
+// Grows the three outer arrays (by doubling) until `slot` is a valid
+// index, zero-initializing every newly added slot so it reads as "never
+// stored to" — same meaning a static zero-initialized array gave every
+// slot for free before this became dynamic. Returns 0 (leaving the
+// arrays at whatever size they already were) if an allocation fails —
+// same "caching is always optional, never load-bearing" rule as
+// everywhere else this cache touches the runtime; the caller (only
+// kestrelc_memo_store — kestrelc_memo_lookup never needs to grow, a slot
+// past the current capacity has definitely never been stored to) treats
+// that as "skip caching this entry."
+static int kestrelc_memo_ensure_slot_capacity(int slot) {
+    if (slot < kestrelc_memo_slot_capacity) {
+        return 1;
+    }
+    int new_capacity = kestrelc_memo_slot_capacity == 0 ? KESTRELC_MEMO_INITIAL_SLOT_CAPACITY : kestrelc_memo_slot_capacity * 2;
+    while (new_capacity <= slot) {
+        new_capacity *= 2;
+    }
+    kestrelc_memo_entry** new_tables = realloc(kestrelc_memo_tables, (size_t)new_capacity * sizeof(kestrelc_memo_entry*));
+    if (!new_tables) {
+        return 0;
+    }
+    kestrelc_memo_tables = new_tables;
+    int* new_counts = realloc(kestrelc_memo_counts, (size_t)new_capacity * sizeof(int));
+    if (!new_counts) {
+        return 0;
+    }
+    kestrelc_memo_counts = new_counts;
+    int* new_caps = realloc(kestrelc_memo_caps, (size_t)new_capacity * sizeof(int));
+    if (!new_caps) {
+        return 0;
+    }
+    kestrelc_memo_caps = new_caps;
+
+    size_t added = (size_t)(new_capacity - kestrelc_memo_slot_capacity);
+    memset(kestrelc_memo_tables + kestrelc_memo_slot_capacity, 0, added * sizeof(kestrelc_memo_entry*));
+    memset(kestrelc_memo_counts + kestrelc_memo_slot_capacity, 0, added * sizeof(int));
+    memset(kestrelc_memo_caps + kestrelc_memo_slot_capacity, 0, added * sizeof(int));
+    kestrelc_memo_slot_capacity = new_capacity;
+    return 1;
+}
 
 // FNV-1a over the raw argument bytes — not cryptographic, doesn't need
 // to be; this is a cache key for a single process's own memoized calls,
@@ -340,8 +390,8 @@ static void kestrelc_memo_grow(int slot) {
 // Returns 1 and writes the cached result to *out if this exact argument
 // list was seen before; returns 0 (leaving *out untouched) on a miss.
 int kestrelc_memo_lookup(int slot, const long long* args, int nargs, long long* out) {
-    if (slot < 0 || slot >= KESTRELC_MEMO_MAX_SLOTS) {
-        return 0;
+    if (slot < 0 || slot >= kestrelc_memo_slot_capacity) {
+        return 0; // never grown this far -> definitely never stored to
     }
     int cap = kestrelc_memo_caps[slot];
     if (cap == 0) {
@@ -370,8 +420,11 @@ int kestrelc_memo_lookup(int slot, const long long* args, int nargs, long long* 
 // that call actually returns — see codegen.rs's memoized-function
 // epilogue.
 void kestrelc_memo_store(int slot, const long long* args, int nargs, long long result) {
-    if (slot < 0 || slot >= KESTRELC_MEMO_MAX_SLOTS || nargs < 0 || nargs > KESTRELC_MEMO_MAX_ARGS) {
+    if (slot < 0 || nargs < 0 || nargs > KESTRELC_MEMO_MAX_ARGS) {
         return;
+    }
+    if (!kestrelc_memo_ensure_slot_capacity(slot)) {
+        return; // allocation failure growing the outer table; skip caching this entry
     }
     // Grow before inserting whenever occupied would reach half of
     // capacity — keeps probe chains short (load factor <= 0.5) no

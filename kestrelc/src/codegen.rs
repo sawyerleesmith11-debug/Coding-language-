@@ -44,16 +44,20 @@ struct ProfileState {
     entries: Vec<(DataId, usize, DataId)>, // (name_data, name_len, counter_data), in declaration order
 }
 
-/// A function is only ever assigned a slot (see MEMO_MAX_ARGS/SLOTS
-/// below and `compile_program`'s eligibility check) when it's provably
-/// safe: `pure`, not `main`, never passed as `parallel_map`'s callback
+/// A function is only ever assigned a slot (see MEMO_MAX_ARGS below and
+/// `compile_program`'s eligibility check) when it's provably safe:
+/// `pure`, not `main`, never passed as `parallel_map`'s callback
 /// argument anywhere in the program (see
 /// `inline::collect_parallel_map_callbacks` — reused here for the
 /// opposite reason inline.rs uses it: that set is exactly "functions
 /// ever called from more than one OS thread," so excluding them is what
 /// makes the runtime cache in `kestrelc_runtime.c` safe with zero
 /// locking), and has only scalar (no array) parameters — arrays would
-/// need per-element hashing this first pass doesn't implement. Always
+/// need per-element hashing this first pass doesn't implement. No cap on
+/// how many functions can be eligible — `kestrelc_runtime.c`'s outer
+/// slot table grows on demand (see `kestrelc_memo_ensure_slot_capacity`
+/// there); a fixed 64-slot cap used to exist here and silently stop
+/// memoizing past it, removed once the runtime side could grow. Always
 /// active (unlike `ProfileState`, doesn't depend on a cache directory
 /// existing) — `slots` is simply empty when there's nothing eligible.
 struct MemoState {
@@ -64,10 +68,6 @@ struct MemoState {
 
 /// Mirrors `KESTRELC_MEMO_MAX_ARGS` in kestrelc_runtime.c.
 const MEMO_MAX_ARGS: usize = 4;
-/// Mirrors `KESTRELC_MEMO_MAX_SLOTS` in kestrelc_runtime.c — a program
-/// with more eligible functions than this just stops assigning slots
-/// past the cap; those functions compile normally, just unmemoized.
-const MEMO_MAX_SLOTS: usize = 64;
 
 pub struct Codegen {
     module: ObjectModule,
@@ -282,7 +282,6 @@ impl Codegen {
                 && !f.params.is_empty()
                 && f.params.len() <= MEMO_MAX_ARGS
                 && f.params.iter().all(|p| matches!(p.ty, Type::Named(_)))
-                && (next_memo_slot as usize) < MEMO_MAX_SLOTS
             {
                 self.memo.slots.insert(f.name, next_memo_slot);
                 next_memo_slot += 1;
