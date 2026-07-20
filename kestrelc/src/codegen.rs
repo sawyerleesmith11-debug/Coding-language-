@@ -43,6 +43,31 @@ struct ProfileState {
     entries: Vec<(DataId, usize, DataId)>, // (name_data, name_len, counter_data), in declaration order
 }
 
+/// A function is only ever assigned a slot (see MEMO_MAX_ARGS/SLOTS
+/// below and `compile_program`'s eligibility check) when it's provably
+/// safe: `pure`, not `main`, never passed as `parallel_map`'s callback
+/// argument anywhere in the program (see
+/// `inline::collect_parallel_map_callbacks` — reused here for the
+/// opposite reason inline.rs uses it: that set is exactly "functions
+/// ever called from more than one OS thread," so excluding them is what
+/// makes the runtime cache in `kestrelc_runtime.c` safe with zero
+/// locking), and has only scalar (no array) parameters — arrays would
+/// need per-element hashing this first pass doesn't implement. Always
+/// active (unlike `ProfileState`, doesn't depend on a cache directory
+/// existing) — `slots` is simply empty when there's nothing eligible.
+struct MemoState {
+    lookup_id: FuncId,
+    store_id: FuncId,
+    slots: HashMap<String, i32>,
+}
+
+/// Mirrors `KESTRELC_MEMO_MAX_ARGS` in kestrelc_runtime.c.
+const MEMO_MAX_ARGS: usize = 4;
+/// Mirrors `KESTRELC_MEMO_MAX_SLOTS` in kestrelc_runtime.c — a program
+/// with more eligible functions than this just stops assigning slots
+/// past the cap; those functions compile normally, just unmemoized.
+const MEMO_MAX_SLOTS: usize = 64;
+
 pub struct Codegen {
     module: ObjectModule,
     fn_ids: HashMap<String, FuncId>,
@@ -50,6 +75,7 @@ pub struct Codegen {
     pmap_id: FuncId,
     bounds_fail_id: FuncId,
     profile: Option<ProfileState>,
+    memo: MemoState,
     str_cache: HashMap<String, StrConst>,
     str_counter: usize,
     where_info: HashMap<String, WhereInfo>,
@@ -162,6 +188,31 @@ impl Codegen {
             .declare_function("kestrelc_profile_record", Linkage::Import, &profile_record_sig)
             .map_err(|e| CodegenError(e.to_string()))?;
 
+        // kestrelc_memo_lookup(slot: i32, args: i64 ptr, nargs: i32, out:
+        // i64 ptr) -> i32 (hit) and kestrelc_memo_store(slot: i32, args:
+        // i64 ptr, nargs: i32, result: i64) -> () — declared
+        // unconditionally like every other runtime import; `memo.slots`
+        // below may still end up empty for a given program, in which
+        // case these are simply never called.
+        let mut memo_lookup_sig = Signature::new(call_conv);
+        memo_lookup_sig.params.push(AbiParam::new(types::I32)); // slot
+        memo_lookup_sig.params.push(AbiParam::new(types::I64)); // args ptr
+        memo_lookup_sig.params.push(AbiParam::new(types::I32)); // nargs
+        memo_lookup_sig.params.push(AbiParam::new(types::I64)); // out ptr
+        memo_lookup_sig.returns.push(AbiParam::new(types::I32)); // hit
+        let memo_lookup_id = module
+            .declare_function("kestrelc_memo_lookup", Linkage::Import, &memo_lookup_sig)
+            .map_err(|e| CodegenError(e.to_string()))?;
+
+        let mut memo_store_sig = Signature::new(call_conv);
+        memo_store_sig.params.push(AbiParam::new(types::I32)); // slot
+        memo_store_sig.params.push(AbiParam::new(types::I64)); // args ptr
+        memo_store_sig.params.push(AbiParam::new(types::I32)); // nargs
+        memo_store_sig.params.push(AbiParam::new(types::I64)); // result
+        let memo_store_id = module
+            .declare_function("kestrelc_memo_store", Linkage::Import, &memo_store_sig)
+            .map_err(|e| CodegenError(e.to_string()))?;
+
         let profile = match profile_path {
             Some(path) => {
                 let path_bytes = path.into_bytes();
@@ -190,6 +241,7 @@ impl Codegen {
             pmap_id,
             bounds_fail_id,
             profile,
+            memo: MemoState { lookup_id: memo_lookup_id, store_id: memo_store_id, slots: HashMap::new() },
             str_cache: HashMap::new(),
             str_counter: 0,
             where_info: HashMap::new(),
@@ -216,10 +268,24 @@ impl Codegen {
     }
 
     pub fn compile_program(&mut self, program: &Program) -> Result<(), CodegenError> {
+        let pmap_callbacks = crate::inline::collect_parallel_map_callbacks(program);
+        let mut next_memo_slot: i32 = 0;
+
         // Pass 1: declare every function's signature so calls (including
         // forward references and recursion) can be resolved regardless
         // of source order.
         for f in program {
+            if f.pure
+                && f.name != "main"
+                && !pmap_callbacks.contains(&f.name)
+                && !f.params.is_empty()
+                && f.params.len() <= MEMO_MAX_ARGS
+                && f.params.iter().all(|p| matches!(p.ty, Type::Named(_)))
+                && (next_memo_slot as usize) < MEMO_MAX_SLOTS
+            {
+                self.memo.slots.insert(f.name.clone(), next_memo_slot);
+                next_memo_slot += 1;
+            }
             let sig = Self::fn_signature(f, self.call_conv);
             let id = self
                 .module
@@ -337,24 +403,74 @@ impl Codegen {
                 }
             }
 
+            // Memoization: if this function was assigned a slot (see
+            // compile_program's eligibility check), pack its scalar
+            // params into a small stack buffer and ask the runtime cache
+            // whether this exact argument list was already computed. A
+            // hit returns immediately, skipping the body entirely; a
+            // miss falls through into normal codegen below, with
+            // `memo_args_ptr` remembered so the epilogue (below) can
+            // store the freshly-computed result before the function
+            // actually returns.
+            let my_memo_slot = self.memo.slots.get(&f.name).copied();
+            let mut memo_args_ptr: Option<Value> = None;
+            if let Some(slot) = my_memo_slot {
+                let nargs = f.params.len();
+                let args_size = (nargs * 8) as u32;
+                let args_slot = builder.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, args_size, 3));
+                let args_ptr = builder.ins().stack_addr(types::I64, args_slot, 0);
+                for (i, p) in f.params.iter().enumerate() {
+                    if let Slot::Scalar(v) = &vars[&p.name] {
+                        let val = builder.use_var(*v);
+                        builder.ins().store(MemFlags::new(), val, args_ptr, (i * 8) as i32);
+                    }
+                }
+                let out_slot = builder.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 8, 3));
+                let out_ptr = builder.ins().stack_addr(types::I64, out_slot, 0);
+                let slot_val = builder.ins().iconst(types::I32, slot as i64);
+                let nargs_val = builder.ins().iconst(types::I32, nargs as i64);
+                let local_lookup = self.module.declare_func_in_func(self.memo.lookup_id, builder.func);
+                let call = builder.ins().call(local_lookup, &[slot_val, args_ptr, nargs_val, out_ptr]);
+                let hit = builder.inst_results(call)[0];
+                let zero32 = builder.ins().iconst(types::I32, 0);
+                let is_hit = builder.ins().icmp(IntCC::NotEqual, hit, zero32);
+                let hit_blk = builder.create_block();
+                let miss_blk = builder.create_block();
+                builder.ins().brif(is_hit, hit_blk, &[], miss_blk, &[]);
+
+                builder.switch_to_block(hit_blk);
+                builder.seal_block(hit_blk);
+                let cached = builder.ins().load(types::I64, MemFlags::new(), out_ptr, 0);
+                builder.ins().return_(&[cached]);
+
+                builder.switch_to_block(miss_blk);
+                builder.seal_block(miss_blk);
+                memo_args_ptr = Some(args_ptr);
+            }
+
             // `main` compiles straight to the linked binary's C `main`
             // (see main.rs's Linkage::Export by name) — it's the only
             // function whose return is "the process is about to exit,"
             // so it's the only place a profile flush can safely run
             // exactly once regardless of which `return` statement (or
-            // none at all) actually ends the run. Every `return` inside
-            // `main` gets redirected to jump to `epilogue_blk` instead of
-            // returning directly (see FnCodegen::gen_stmt's Return arm);
-            // the flush calls are emitted there, once, right before the
-            // real `return_`.
-            let epilogue: Option<(Block, Variable)> = if f.name == "main" && self.profile.is_some() {
-                let epilogue_blk = builder.create_block();
-                let ret_var = Variable::from_u32(next_var);
-                builder.declare_var(ret_var, types::I64);
-                Some((epilogue_blk, ret_var))
-            } else {
-                None
-            };
+            // none at all) actually ends the run. A memoized function's
+            // every `return` needs the same "run something once, right
+            // before the real return, no matter which return statement
+            // fired" treatment (store the freshly-computed result), so
+            // both cases redirect every `return` inside the function to
+            // jump to `epilogue_blk` instead of returning directly (see
+            // FnCodegen::gen_stmt's Return arm) — mutually exclusive
+            // triggers (memoization eligibility excludes `main`), so
+            // there's no case where both would need to run.
+            let epilogue: Option<(Block, Variable)> =
+                if (f.name == "main" && self.profile.is_some()) || my_memo_slot.is_some() {
+                    let epilogue_blk = builder.create_block();
+                    let ret_var = Variable::from_u32(next_var);
+                    builder.declare_var(ret_var, types::I64);
+                    Some((epilogue_blk, ret_var))
+                } else {
+                    None
+                };
 
             let mut fc = FnCodegen {
                 builder,
@@ -379,24 +495,39 @@ impl Codegen {
                 }
                 fc.builder.switch_to_block(epilogue_blk);
                 fc.builder.seal_block(epilogue_blk);
-                if let Some(profile) = &self.profile {
-                    let local_path = fc.module.declare_data_in_func(profile.path_data, fc.builder.func);
-                    let path_ptr = fc.builder.ins().symbol_value(types::I64, local_path);
-                    let path_len_val = fc.builder.ins().iconst(types::I64, profile.path_len as i64);
-                    let local_record = fc.module.declare_func_in_func(profile.record_id, fc.builder.func);
-                    for (i, (name_data, name_len, counter_data)) in profile.entries.iter().enumerate() {
-                        let local_name = fc.module.declare_data_in_func(*name_data, fc.builder.func);
-                        let name_ptr = fc.builder.ins().symbol_value(types::I64, local_name);
-                        let name_len_val = fc.builder.ins().iconst(types::I64, *name_len as i64);
-                        let local_counter = fc.module.declare_data_in_func(*counter_data, fc.builder.func);
-                        let counter_addr = fc.builder.ins().symbol_value(types::I64, local_counter);
-                        let count_val = fc.builder.ins().load(types::I64, MemFlags::new(), counter_addr, 0);
-                        let is_first = fc.builder.ins().iconst(types::I32, if i == 0 { 1 } else { 0 });
-                        fc.builder.ins().call(
-                            local_record,
-                            &[path_ptr, path_len_val, name_ptr, name_len_val, count_val, is_first],
-                        );
+                if f.name == "main" {
+                    if let Some(profile) = &self.profile {
+                        let local_path = fc.module.declare_data_in_func(profile.path_data, fc.builder.func);
+                        let path_ptr = fc.builder.ins().symbol_value(types::I64, local_path);
+                        let path_len_val = fc.builder.ins().iconst(types::I64, profile.path_len as i64);
+                        let local_record = fc.module.declare_func_in_func(profile.record_id, fc.builder.func);
+                        for (i, (name_data, name_len, counter_data)) in profile.entries.iter().enumerate() {
+                            let local_name = fc.module.declare_data_in_func(*name_data, fc.builder.func);
+                            let name_ptr = fc.builder.ins().symbol_value(types::I64, local_name);
+                            let name_len_val = fc.builder.ins().iconst(types::I64, *name_len as i64);
+                            let local_counter = fc.module.declare_data_in_func(*counter_data, fc.builder.func);
+                            let counter_addr = fc.builder.ins().symbol_value(types::I64, local_counter);
+                            let count_val = fc.builder.ins().load(types::I64, MemFlags::new(), counter_addr, 0);
+                            let is_first = fc.builder.ins().iconst(types::I32, if i == 0 { 1 } else { 0 });
+                            fc.builder.ins().call(
+                                local_record,
+                                &[path_ptr, path_len_val, name_ptr, name_len_val, count_val, is_first],
+                            );
+                        }
                     }
+                } else if let Some(slot) = my_memo_slot {
+                    // A cache miss reached here (a hit already returned
+                    // directly from `hit_blk` above, before the body
+                    // ever ran) — store the just-computed result under
+                    // this exact argument list before actually
+                    // returning, so the *next* call with the same
+                    // arguments hits the cache instead of recomputing.
+                    let args_ptr = memo_args_ptr.expect("memo epilogue implies memo_args_ptr was set");
+                    let ret_val = fc.builder.use_var(ret_var);
+                    let slot_val = fc.builder.ins().iconst(types::I32, slot as i64);
+                    let nargs_val = fc.builder.ins().iconst(types::I32, f.params.len() as i64);
+                    let local_store = fc.module.declare_func_in_func(self.memo.store_id, fc.builder.func);
+                    fc.builder.ins().call(local_store, &[slot_val, args_ptr, nargs_val, ret_val]);
                 }
                 let ret_val = fc.builder.use_var(ret_var);
                 fc.builder.ins().return_(&[ret_val]);

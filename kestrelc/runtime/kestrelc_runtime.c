@@ -232,3 +232,78 @@ void kestrelc_profile_record(const char* path, long long path_len, const char* n
     fprintf(f, " %lld\n", merged);
     fclose(f);
 }
+
+// Memoization cache for `pure fn` calls — kestrel-DESIGN.md idea #2/#4:
+// a pure function can't observe or be affected by any other call to
+// itself, so caching by argument value is always safe. `run`/`runFast`
+// (kestrel.js) already do this per-interpreter-run; this is the native
+// backend's version. One table per memoized function ("slot", assigned
+// at compile time by codegen.rs — see MemoState), each table a plain
+// growable array scanned linearly. No locking anywhere: codegen.rs only
+// ever assigns a slot to a function that's never passed as
+// parallel_map's callback argument (see inline.rs's
+// collect_parallel_map_callbacks, reused for exactly this exclusion),
+// so a memoized function's cache is provably only ever touched from the
+// single calling thread — real safety from a compile-time exclusion,
+// not a runtime lock nobody profiles this small would want to pay for.
+//
+// Fixed-size slot table, not a dynamic map: kestrelc assigns slots
+// sequentially per compiled program and never exceeds
+// KESTRELC_MEMO_MAX_SLOTS (see codegen.rs) — a plain array indexed by
+// slot is simplest and fastest for a compiler this scoped.
+#define KESTRELC_MEMO_MAX_SLOTS 64
+#define KESTRELC_MEMO_MAX_ARGS 4
+
+typedef struct {
+    long long args[KESTRELC_MEMO_MAX_ARGS];
+    int nargs;
+    long long result;
+} kestrelc_memo_entry;
+
+static kestrelc_memo_entry* kestrelc_memo_tables[KESTRELC_MEMO_MAX_SLOTS];
+static int kestrelc_memo_counts[KESTRELC_MEMO_MAX_SLOTS];
+static int kestrelc_memo_caps[KESTRELC_MEMO_MAX_SLOTS];
+
+// Returns 1 and writes the cached result to *out if this exact argument
+// list was seen before; returns 0 (leaving *out untouched) on a miss.
+int kestrelc_memo_lookup(int slot, const long long* args, int nargs, long long* out) {
+    if (slot < 0 || slot >= KESTRELC_MEMO_MAX_SLOTS) {
+        return 0;
+    }
+    kestrelc_memo_entry* table = kestrelc_memo_tables[slot];
+    int n = kestrelc_memo_counts[slot];
+    for (int i = 0; i < n; i++) {
+        if (table[i].nargs == nargs && memcmp(table[i].args, args, (size_t)nargs * sizeof(long long)) == 0) {
+            *out = table[i].result;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+// Called once per genuinely-computed (cache-miss) call, right before
+// that call actually returns — see codegen.rs's memoized-function
+// epilogue. A realloc failure here just means this one entry never gets
+// cached (the function still returns the correct value either way) —
+// same "caching is always an optimization, never a correctness
+// dependency" rule as cache.rs and profile.rs.
+void kestrelc_memo_store(int slot, const long long* args, int nargs, long long result) {
+    if (slot < 0 || slot >= KESTRELC_MEMO_MAX_SLOTS || nargs < 0 || nargs > KESTRELC_MEMO_MAX_ARGS) {
+        return;
+    }
+    if (kestrelc_memo_counts[slot] >= kestrelc_memo_caps[slot]) {
+        int new_cap = kestrelc_memo_caps[slot] == 0 ? 16 : kestrelc_memo_caps[slot] * 2;
+        kestrelc_memo_entry* grown = realloc(kestrelc_memo_tables[slot], (size_t)new_cap * sizeof(kestrelc_memo_entry));
+        if (!grown) {
+            return;
+        }
+        kestrelc_memo_tables[slot] = grown;
+        kestrelc_memo_caps[slot] = new_cap;
+    }
+    kestrelc_memo_entry* e = &kestrelc_memo_tables[slot][kestrelc_memo_counts[slot]++];
+    for (int i = 0; i < nargs; i++) {
+        e->args[i] = args[i];
+    }
+    e->nargs = nargs;
+    e->result = result;
+}

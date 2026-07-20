@@ -284,6 +284,27 @@ argument to always be a plain identifier bound via a literal-length
 re-introduces a `let` binding for the source array where the JS
 version would just inline it.
 
+## Memoization (native only)
+
+A `pure fn` called repeatedly with the same arguments returns the
+cached result instead of recomputing — safe because purity means the
+call can't observe or be affected by any other call to itself. Eligible
+functions: `pure`, not `main`, only scalar (no array) parameters, and
+**never passed as `parallel_map`'s callback argument anywhere in the
+program**. That last rule is the whole safety story: a memoized
+function's own cache (`kestrelc_runtime.c`'s `kestrelc_memo_lookup`/
+`kestrelc_memo_store`) has no locking at all, which is only sound
+because the exclusion guarantees it's never touched from more than one
+OS thread — `parallel_map`'s worker threads are the only way a Kestrel
+function ever runs concurrently, and any function that could be called
+that way is compiled unmemoized instead. Eligible functions get a
+compile-time-assigned "slot" (capped at 64 per program — a function
+past the cap just compiles unmemoized, not an error); each slot is a
+plain growable array of `(args, result)` entries, linear-scanned, since
+these are small toy programs, not a scale target for a hash table yet.
+Recursive functions memoize correctly too (each recursive call is a
+normal lookup-or-compute-and-store against the same slot).
+
 ## Benchmarks
 
 Measured on this machine, comparing `kestrelc`-compiled binaries against

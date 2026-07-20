@@ -1299,3 +1299,123 @@ fn native_recompile_after_a_run_produces_a_different_cache_entry_and_still_runs_
         String::from_utf8_lossy(&third_compile.stdout)
     );
 }
+
+// ==================== native memoization ====================
+
+#[test]
+fn memoized_recursive_pure_fn_still_produces_correct_output() {
+    // fib is pure, scalar-param, never passed to parallel_map — eligible
+    // for a memo slot (see codegen.rs's MemoState). Recursive calls hit
+    // and populate the *same* slot's cache mid-computation; this is the
+    // real end-to-end proof that doesn't miscompile, not just "codegen
+    // didn't crash."
+    let scratch = scratch_dir("memo_fib");
+    let src_path = scratch.join("memo_fib.kes");
+    fs::write(
+        &src_path,
+        "pure fn fib(n: i64) -> i64 {\n\
+         \x20   if (n < 2) {\n\
+         \x20       return n;\n\
+         \x20   }\n\
+         \x20   return fib(n - 1) + fib(n - 2);\n\
+         }\n\
+         fn main() {\n\
+         \x20   let i = 0;\n\
+         \x20   while (i < 15) {\n\
+         \x20       print(fib(i));\n\
+         \x20       i = i + 1;\n\
+         \x20   }\n\
+         }\n",
+    )
+    .unwrap();
+
+    let out = Command::new(kestrelc_bin())
+        .arg(&src_path)
+        .current_dir(&scratch)
+        .output()
+        .expect("failed to run kestrelc");
+    assert!(out.status.success(), "compile failed:\n{}", String::from_utf8_lossy(&out.stderr));
+
+    let bin = scratch.join("memo_fib");
+    let run = Command::new(&bin).output().expect("failed to run compiled binary");
+    assert!(run.status.success(), "compiled binary exited with failure");
+    let expected = "0\n1\n1\n2\n3\n5\n8\n13\n21\n34\n55\n89\n144\n233\n377\n";
+    assert_eq!(native_stdout(&run), expected);
+}
+
+#[test]
+fn memoized_fn_called_with_the_same_arguments_repeatedly_returns_the_same_answer() {
+    // Not observably different from an unmemoized call as far as output
+    // goes (memoization is a perf optimization, correctness must be
+    // unchanged) — this exercises many repeated calls with overlapping
+    // argument values, the case a broken cache (wrong-key collision,
+    // stale entry) would most likely get wrong.
+    let scratch = scratch_dir("memo_repeat");
+    let src_path = scratch.join("prog.kes");
+    fs::write(
+        &src_path,
+        "pure fn square(x: i64) -> i64 { return x * x; }\n\
+         fn main() {\n\
+         \x20   let i = 0;\n\
+         \x20   let total = 0;\n\
+         \x20   while (i < 20) {\n\
+         \x20       total = total + square(i % 5);\n\
+         \x20       i = i + 1;\n\
+         \x20   }\n\
+         \x20   print(total);\n\
+         }\n",
+    )
+    .unwrap();
+
+    let out = Command::new(kestrelc_bin())
+        .arg(&src_path)
+        .current_dir(&scratch)
+        .output()
+        .expect("failed to run kestrelc");
+    assert!(out.status.success(), "compile failed:\n{}", String::from_utf8_lossy(&out.stderr));
+
+    let bin = scratch.join("prog");
+    let run = Command::new(&bin).output().expect("failed to run compiled binary");
+    assert!(run.status.success());
+    // i % 5 cycles 0,1,2,3,4 four times; squares sum to 0+1+4+9+16=30 per
+    // cycle, times 4 cycles = 120.
+    assert_eq!(native_stdout(&run), "120\n");
+}
+
+#[test]
+fn a_function_used_as_a_parallel_map_callback_is_never_memoized_and_still_runs_correctly() {
+    // The whole safety argument for lock-free memoization is that a
+    // memoized function is provably never called from more than one OS
+    // thread — codegen.rs excludes any function ever passed as
+    // parallel_map's callback from getting a memo slot at all (see
+    // inline::collect_parallel_map_callbacks, reused for this). This
+    // doesn't (and can't, from the outside) observe the *absence* of a
+    // memo slot directly, but it does prove such a program still
+    // compiles and runs correctly under both a direct call and the
+    // parallel_map path to the same function.
+    let scratch = scratch_dir("memo_pmap_exclude");
+    let src_path = scratch.join("prog.kes");
+    fs::write(
+        &src_path,
+        "pure fn triple(x: i64) -> i64 { return x * 3; }\n\
+         fn main() {\n\
+         \x20   let xs = [1, 2, 3, 4, 5];\n\
+         \x20   let ys = parallel_map(triple, xs);\n\
+         \x20   print(ys[0], ys[4]);\n\
+         \x20   print(triple(9));\n\
+         }\n",
+    )
+    .unwrap();
+
+    let out = Command::new(kestrelc_bin())
+        .arg(&src_path)
+        .current_dir(&scratch)
+        .output()
+        .expect("failed to run kestrelc");
+    assert!(out.status.success(), "compile failed:\n{}", String::from_utf8_lossy(&out.stderr));
+
+    let bin = scratch.join("prog");
+    let run = Command::new(&bin).output().expect("failed to run compiled binary");
+    assert!(run.status.success());
+    assert_eq!(native_stdout(&run), "3 15\n27\n");
+}

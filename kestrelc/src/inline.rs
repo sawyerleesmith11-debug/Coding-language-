@@ -113,8 +113,14 @@ fn walk_stmts_exprs<'a>(stmts: &'a [Stmt], on_expr: &mut impl FnMut(&'a Expr)) {
 
 /// Every function name ever passed as `parallel_map`'s first (callback)
 /// argument, anywhere in the program — see the module doc comment for
-/// why those can never be inlined away.
-fn collect_parallel_map_callbacks(program: &Program) -> HashSet<String> {
+/// why those can never be inlined away. `pub(crate)` because codegen.rs
+/// reuses this exact same set for a different reason: memoization
+/// (kestrel-DESIGN.md's own idea #2/#4) needs its cache to never be
+/// touched from more than one OS thread at once, and a function in this
+/// set is exactly the one kind of pure function that's ever called from
+/// a `parallel_map` worker thread — excluding it is what makes
+/// memoization's cache lock-free-safe without ever needing a real lock.
+pub(crate) fn collect_parallel_map_callbacks(program: &Program) -> HashSet<String> {
     let mut callbacks = HashSet::new();
     fn note_calls(e: &Expr, callbacks: &mut HashSet<String>) {
         if let Expr::Call { name, args } = e {

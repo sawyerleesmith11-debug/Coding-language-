@@ -407,20 +407,44 @@ etc.) and codegen-internal errors in every backend are still
 message-only, since they're not part of the AST-walking checkers this
 change touched.
 
-**Memoization, shipped (JS backends only):** both `run` and `runFast`
-now cache a `pure fn`'s result by argument value, scoped to a single
-`run`/`runFast` call — a repeated call with identical arguments returns
-the cached value instead of re-executing. This is always safe per the
-idea #2/#4 purity proof: a `pure fn` can't observe or be affected by
-any other call to itself, so caching changes nothing observable. Cache
-key is a canonicalized `JSON.stringify` of the argument list; the one
-correctness wrinkle was that `JSON.stringify(NaN) === JSON.stringify(null)`,
-and Kestrel can produce a real runtime `null` via a bare `return;` even
-with a declared return type — so `NaN` is swapped for a sentinel string
-before stringifying to keep those cases from colliding on the same key.
-**Scope, honestly:** `kestrelc` (native, via Cranelift) does not memoize
-at all yet — this is JS-backends-first, matching the project's usual
-pattern of new semantics landing there before the native compiler.
+**Memoization, shipped (all backends, including native now):** both
+`run` and `runFast` cache a `pure fn`'s result by argument value, scoped
+to a single `run`/`runFast` call — a repeated call with identical
+arguments returns the cached value instead of re-executing. This is
+always safe per the idea #2/#4 purity proof: a `pure fn` can't observe
+or be affected by any other call to itself, so caching changes nothing
+observable. Cache key is a canonicalized `JSON.stringify` of the
+argument list; the one correctness wrinkle was that
+`JSON.stringify(NaN) === JSON.stringify(null)`, and Kestrel can produce
+a real runtime `null` via a bare `return;` even with a declared return
+type — so `NaN` is swapped for a sentinel string before stringifying to
+keep those cases from colliding on the same key.
+
+`kestrelc` (native, via Cranelift) now memoizes too, deliberately scoped
+down from the JS backends' version rather than a straight port — the
+risk that held this back (see the previous scoping note here) was real:
+a memoized `pure fn` can also be invoked from a `parallel_map` worker
+thread, and a cache written from multiple OS threads without a lock is
+a genuine race, not a hypothetical one. The fix is a compile-time
+exclusion, not a runtime lock: `codegen.rs` only ever assigns a memo
+slot to a function that's *never* passed as `parallel_map`'s callback
+argument anywhere in the program (`inline::collect_parallel_map_callbacks`,
+the exact same whole-program analysis `inline.rs` already computes for
+a different reason, reused here) — a function excluded that way is
+provably only ever called from the one thread that calls it directly,
+so the cache (`kestrelc_runtime.c`'s `kestrelc_memo_lookup`/
+`kestrelc_memo_store`, a fixed-size array of growable per-function
+tables, one linear-scan table per memoized function) needs zero
+locking. Also scoped down from the JS version in two more ways: only
+functions with *scalar* (no array) parameters are eligible — arrays
+would need per-element hashing this first pass doesn't implement — and
+the cache is a compile-time-assigned fixed slot per function (capped at
+64 memoized functions per program), not a general keyed-by-name map.
+Verified against a recursive `fib` (repeated overlapping sub-calls, the
+case memoization is meant for) and against a `pure fn` used both
+directly and as a `parallel_map` callback in the same program, to prove
+the exclusion doesn't break the parallel path — see
+`kestrelc/tests/integration.rs`'s memoization tests.
 
 **Measured** on this machine, `runFast`, external-process/best-of-5
 timing: naive recursive `fib(32)` — **2.7ms memoized vs 465ms
@@ -471,8 +495,8 @@ the JS version, not a scope gap: `kestrelc`'s codegen requires a
 a literal-length `let`, never an inline array literal, so the fused
 output re-introduces a `let` binding for the source array instead of
 inlining it directly — same optimization, output shaped to what this
-backend's codegen actually accepts. `kestrelc` does not memoize yet —
-see below.
+backend's codegen actually accepts. `kestrelc` now memoizes too (a
+separate optimization from fusion) — see the memoization section above.
 
 Not yet implemented (future work, roughly in priority order):
 1. Full per-expression position tracking — purity/type errors, in both
@@ -482,9 +506,11 @@ Not yet implemented (future work, roughly in priority order):
    node, not just statements. Still open: runtime errors (unknown
    identifier, out-of-bounds index, etc.) and codegen-internal errors
    in every backend are still message-only.
-2. Bringing memoization (shipped in the JS backends, see above) to
-   `kestrelc` — `parallel_map`-chain fusion is now in both. Also:
-   generalizing fusion beyond the current narrow adjacent-`let` shape.
+2. Memoization is now in all backends (see above), scoped down for the
+   native one to scalar-only parameters and a 64-slot cap, and
+   `parallel_map`-chain fusion is now in both — still open: generalizing
+   fusion beyond the current narrow adjacent-`let` shape, and lifting
+   native memoization's scalar-only/64-slot limits.
 3. Proof-based bounds-check *elision* in `kestrelc` — **the design
    doc's own `get_safe` example now works exactly as originally
    specified**: `where i < N` is proven at every call site (a literal
