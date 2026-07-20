@@ -90,7 +90,14 @@ parallel. There's now also a first, honestly-scoped **type checker**
 (every backend) — catches `5 + true`, `if (5) {...}`, and function
 calls with the wrong argument count at compile time, though it doesn't
 yet check declared parameter type names against call-site arguments;
-see `docs/SYNTAX.md`'s "Type checking" section. Next up, in priority
-order: better compile-error locations (line/column/span), pure-function
-loop fusion and memoization, the fuller profile-guided cache, and
-layout polymorphism (blocked on structs, which don't exist yet).
+see `docs/SYNTAX.md`'s "Type checking" section. Compile errors now
+include line, column, and a length too, not just a line number —
+`kestrelc`'s CLI/WASM output and lex/parse errors surfaced through
+`kestrel-editor.html` print `file:line:col: message` with a `^` under
+the offending span. Honest scope: only lex/parse errors carry a
+position so far — purity check, type check, and runtime errors are
+still message-only; see `kestrel-DESIGN.md` for the gap. Next up, in
+priority order: extending that position-tracking to the rest of the
+compiler's error stages, pure-function loop fusion and memoization, the
+fuller profile-guided cache, and layout polymorphism (blocked on
+structs, which don't exist yet).

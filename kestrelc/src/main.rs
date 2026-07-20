@@ -1,4 +1,4 @@
-use kestrelc::{cache, codegen, lexer, parser, purity, typecheck, wasm_codegen};
+use kestrelc::{cache, codegen, format_diagnostic, lexer, parser, purity, typecheck, wasm_codegen};
 
 use std::fs;
 use std::path::Path;
@@ -50,7 +50,7 @@ fn main() -> ExitCode {
     let tokens = match lexer::lex(&src) {
         Ok(t) => t,
         Err(e) => {
-            eprintln!("kestrelc: {} (line {})", e.message, e.line);
+            eprintln!("kestrelc: {}", format_diagnostic(&src, &path, e.line, e.col, e.len, &e.message));
             return ExitCode::FAILURE;
         }
     };
@@ -58,7 +58,7 @@ fn main() -> ExitCode {
     let program = match parser::parse(tokens) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("kestrelc: {} (line {})", e.message, e.line);
+            eprintln!("kestrelc: {}", format_diagnostic(&src, &path, e.line, e.col, e.len, &e.message));
             return ExitCode::FAILURE;
         }
     };

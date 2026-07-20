@@ -206,13 +206,12 @@ const KEYWORDS = new Set([
 
 function lex(src) {
   const tokens = [];
-  let i = 0, line = 1;
-  const push = (type, value) => tokens.push({ type, value, line });
+  let i = 0, line = 1, lineStart = 0;
 
   while (i < src.length) {
     const c = src[i];
 
-    if (c === "\n") { line++; i++; continue; }
+    if (c === "\n") { line++; i++; lineStart = i; continue; }
     if (/\s/.test(c)) { i++; continue; }
 
     if (c === "/" && src[i + 1] === "/") {
@@ -220,15 +219,22 @@ function lex(src) {
       continue;
     }
 
+    // Position of the token about to be lexed, captured before any of the
+    // branches below consume characters — `push` below uses it (plus the
+    // now-advanced `i`) to record each token's column and character length,
+    // so parser/lexer errors can point at exactly the offending span
+    // instead of just naming a line.
+    const start = i, startLine = line, startCol = i - lineStart + 1;
+    const push = (type, value) =>
+      tokens.push({ type, value, line: startLine, col: startCol, len: i - start });
+
     if (/[0-9]/.test(c)) {
-      let start = i;
       while (i < src.length && /[0-9.]/.test(src[i])) i++;
       push("NUMBER", parseFloat(src.slice(start, i)));
       continue;
     }
 
     if (/[a-zA-Z_]/.test(c)) {
-      let start = i;
       while (i < src.length && /[a-zA-Z0-9_]/.test(src[i])) i++;
       const word = src.slice(start, i);
       push(KEYWORDS.has(word) ? word.toUpperCase() : "IDENT", word);
@@ -236,26 +242,27 @@ function lex(src) {
     }
 
     if (c === '"') {
-      let start = ++i;
-      while (i < src.length && src[i] !== '"') i++;
-      push("STRING", src.slice(start, i));
       i++;
+      while (i < src.length && src[i] !== '"') i++;
+      const value = src.slice(start + 1, i);
+      i++;
+      push("STRING", value);
       continue;
     }
 
     const two = src.slice(i, i + 2);
     if (["==", "!=", "<=", ">=", "->", "&&", "||"].includes(two)) {
-      push(two, two); i += 2; continue;
+      i += 2; push(two, two); continue;
     }
 
     if ("+-*/%(){}[];,:<>=!.".includes(c)) {
-      push(c, c); i++; continue;
+      i++; push(c, c); continue;
     }
 
-    throw new KestrelError(`Unexpected character '${c}'`, line);
+    throw new KestrelError(`Unexpected character '${c}'`, startLine, startCol, 1);
   }
 
-  push("EOF", null);
+  tokens.push({ type: "EOF", value: null, line, col: i - lineStart + 1, len: 0 });
   return tokens;
 }
 
@@ -285,8 +292,9 @@ function parse(tokens) {
   const advance = () => tokens[pos++];
   const expect = (type) => {
     if (!at(type)) {
+      const t = peek();
       throw new KestrelError(
-        `Expected '${type}' but found '${peek().type}'`, peek().line
+        `Expected '${type}' but found '${t.type}'`, t.line, t.col, t.len
       );
     }
     return advance();
@@ -350,7 +358,7 @@ function parse(tokens) {
       advance();
       return { kind: "ident", name: t.value };
     }
-    throw new KestrelError(`Unexpected token '${t.type}'`, t.line);
+    throw new KestrelError(`Unexpected token '${t.type}'`, t.line, t.col, t.len);
   }
 
   function parsePostfix() {
@@ -815,10 +823,37 @@ function checkTypes(program) {
 // ============================== INTERPRETER ==============================
 
 class KestrelError extends Error {
-  constructor(message, line) {
-    super(line ? `${message} (line ${line})` : message);
+  constructor(message, line, col, len) {
+    super(
+      line
+        ? col
+          ? `${message} (line ${line}, col ${col})`
+          : `${message} (line ${line})`
+        : message
+    );
     this.name = "KestrelError";
+    this.line = line;
+    this.col = col;
+    this.len = len;
   }
+}
+
+// Formats a KestrelError the way the roadmap's "better compile error
+// locations" item describes: `file:line:col: message`, followed by the
+// offending source line and a `^` span underneath it, instead of just
+// naming a line number. Scope, honestly: `err.line`/`col`/`len` are only
+// set by the lexer and parser (see `lex`/`parse` above) — purity check,
+// type check, and runtime errors (unknown identifier, out-of-bounds index,
+// etc.) don't carry a source position yet, a known gap, not silently
+// papered over here. Falls back to the plain message when there's no
+// position to show.
+function formatKestrelError(err, src, filename = "<input>") {
+  if (!err.line) return err.message;
+  const lineText = src.split("\n")[err.line - 1] ?? "";
+  const col = err.col || 1;
+  const caretLen = Math.max(1, err.len || 1);
+  const pointer = " ".repeat(col - 1) + "^".repeat(caretLen);
+  return `${filename}:${err.line}:${col}: ${err.message}\n  ${lineText}\n  ${pointer}`;
 }
 
 class ReturnSignal {
@@ -1377,7 +1412,7 @@ function runFast(src, opts = {}) {
 const Kestrel = {
   lex, parse, checkPurity, checkBounds, checkParallelMap, checkTypes, interpret, run,
   compile, execute, runFast,
-  KestrelError,
+  KestrelError, formatKestrelError,
 };
 if (typeof module !== "undefined") module.exports = Kestrel;
 if (typeof window !== "undefined") window.Kestrel = Kestrel;
@@ -1573,7 +1608,10 @@ function runProgram() {
       printLine(`— finished in ${formatElapsed(elapsed)} (${useFast ? 'fast' : 'compat'}) —`, 'ok');
     } catch (e) {
       const elapsed = performance.now() - start;
-      printLine((e && e.message) ? e.message : String(e), 'err');
+      const text = e instanceof Kestrel.KestrelError
+        ? Kestrel.formatKestrelError(e, codeEl.value)
+        : (e && e.message) ? e.message : String(e);
+      text.split('\n').forEach((line) => printLine(line, 'err'));
       printLine(`— failed after ${formatElapsed(elapsed)} (${useFast ? 'fast' : 'compat'}) —`, 'err');
     } finally {
       markEl.classList.remove('running');
