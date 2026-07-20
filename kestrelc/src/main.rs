@@ -1,4 +1,4 @@
-use kestrelc::{cache, codegen, format_diagnostic, lexer, parser, purity, typecheck, wasm_codegen};
+use kestrelc::{cache, codegen, format_diagnostic, fusion, lexer, parser, purity, typecheck, wasm_codegen};
 
 use std::fs;
 use std::path::Path;
@@ -94,6 +94,8 @@ fn main() -> ExitCode {
         eprintln!("kestrelc: No 'main' function found");
         return ExitCode::FAILURE;
     }
+
+    let program = fusion::fuse_loops(&program);
 
     if wasm {
         let bytes = match wasm_codegen::compile_to_wasm(&program) {

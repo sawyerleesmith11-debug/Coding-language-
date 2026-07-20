@@ -1,4 +1,5 @@
 pub mod ast;
+pub mod fusion;
 pub mod lexer;
 pub mod parser;
 pub mod purity;
@@ -65,6 +66,7 @@ pub fn compile_to_wasm_bytes(src: &str) -> Result<Vec<u8>, String> {
         return Err("No 'main' function found".to_string());
     }
 
+    let program = fusion::fuse_loops(&program);
     wasm_codegen::compile_to_wasm(&program).map_err(|e| e.0)
 }
 
