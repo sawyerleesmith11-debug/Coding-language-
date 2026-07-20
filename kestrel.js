@@ -396,6 +396,73 @@ function checkBounds(program) {
   return notes;
 }
 
+// ============================ PARALLEL_MAP ============================
+// `parallel_map(f, arr)` is a reserved builtin call name (like `print`),
+// not a keyword — see kestrel-DESIGN.md idea #5. Purity is what makes
+// this safe: a `pure fn` can't observe or be affected by any other call
+// to itself, so applying it once per array element has nothing to race
+// over no matter what order (or how much overlap) those calls happen in.
+// This check runs unconditionally (not just inside `pure fn` bodies,
+// unlike checkPurity) since misusing it is a bug regardless of the
+// caller's own purity. `run`/`runFast` only ever execute this
+// sequentially — real thread-level parallelism is kestrelc's native
+// backend only (see kestrelc/runtime/kestrelc_runtime.c); this is about
+// the language contract (safe to run in parallel), not this
+// implementation actually doing so.
+function checkParallelMap(program) {
+  const errors = [];
+  const fns = new Map(program.map((f) => [f.name, f]));
+
+  function visitExpr(e) {
+    if (!e) return;
+    if (e.kind === "call") {
+      if (e.name === "parallel_map") {
+        if (e.args.length !== 2) {
+          errors.push(`parallel_map() takes exactly 2 arguments (a pure function and an array), got ${e.args.length}`);
+        } else {
+          const funcArg = e.args[0];
+          if (funcArg.kind !== "ident") {
+            errors.push("parallel_map()'s first argument must be a bare function name, not an expression");
+          } else {
+            const callee = fns.get(funcArg.name);
+            if (!callee) {
+              errors.push(`parallel_map(): unknown function '${funcArg.name}'`);
+            } else if (!callee.pure) {
+              errors.push(`parallel_map(): '${funcArg.name}' must be a 'pure fn' — parallel safety comes entirely from the purity proof`);
+            } else if (callee.params.length !== 1) {
+              errors.push(`parallel_map(): '${funcArg.name}' must take exactly one parameter (one array element in, one result out), has ${callee.params.length}`);
+            }
+          }
+          visitExpr(e.args[1]);
+        }
+        return;
+      }
+      e.args.forEach(visitExpr);
+      return;
+    }
+    switch (e.kind) {
+      case "binop": visitExpr(e.left); visitExpr(e.right); break;
+      case "unary": visitExpr(e.expr); break;
+      case "index": visitExpr(e.target); visitExpr(e.index); break;
+      case "array_lit": e.elems.forEach(visitExpr); break;
+      default: break;
+    }
+  }
+  function visitStmt(s) {
+    switch (s.kind) {
+      case "let": case "assign": visitExpr(s.value); break;
+      case "if": visitExpr(s.cond); s.thenBlock.forEach(visitStmt);
+        if (s.elseBlock) s.elseBlock.forEach(visitStmt); break;
+      case "while": visitExpr(s.cond); s.body.forEach(visitStmt); break;
+      case "print": s.args.forEach(visitExpr); break;
+      case "return": if (s.value) visitExpr(s.value); break;
+      case "expr_stmt": visitExpr(s.expr); break;
+    }
+  }
+  for (const fn of program) fn.body.forEach(visitStmt);
+  return errors;
+}
+
 // ============================== INTERPRETER ==============================
 
 class KestrelError extends Error {
@@ -457,7 +524,14 @@ function interpret(program, { onPrint = (s) => console.log(s) } = {}) {
         }
         return arr[idx];
       }
-      case "call": return callFn(e.name, e.args.map((a) => evalExpr(a, env)));
+      case "call": {
+        if (e.name === "parallel_map") {
+          const funcName = e.args[0].name; // validated by checkParallelMap to be a bare ident
+          const arr = evalExpr(e.args[1], env);
+          return arr.map((x) => callFn(funcName, [x]));
+        }
+        return callFn(e.name, e.args.map((a) => evalExpr(a, env)));
+      }
     }
     throw new KestrelError(`Cannot evaluate expression of kind '${e.kind}'`);
   }
@@ -562,7 +636,7 @@ function collectSlots(fn) {
 const OP = {
   CONST: 0, LOAD: 1, STORE: 2, ARRAY: 3, INDEX: 4, UNOP: 5, BINOP: 6,
   CALL: 7, PRINT: 8, POP: 9, JUMP: 10, JUMP_IF_FALSE: 11,
-  RETURN_VALUE: 12, RETURN_NULL: 13,
+  RETURN_VALUE: 12, RETURN_NULL: 13, PMAP: 14,
 };
 
 function compile(program) {
@@ -610,6 +684,16 @@ function compile(program) {
         emit(code, OP.INDEX);
         break;
       case "call": {
+        if (e.name === "parallel_map") {
+          // args[0] is a bare function-name identifier, not a value to
+          // evaluate (Kestrel has no first-class functions) — resolve it
+          // to the callee's record at compile time, same idea as OP.CALL.
+          const mapCallee = functions.get(e.args[0].name);
+          if (!mapCallee) throw new KestrelError(`Unknown function '${e.args[0].name}'`);
+          compileExpr(e.args[1], ctx);
+          emit(code, OP.PMAP, mapCallee);
+          break;
+        }
         const callee = functions.get(e.name);
         if (!callee) throw new KestrelError(`Unknown function '${e.name}'`);
         e.args.forEach((a) => compileExpr(a, ctx));
@@ -840,6 +924,23 @@ function execute(functions, entryName, args, onPrint) {
         ip++;
         break;
       }
+      case OP.PMAP: {
+        // Sequential on this backend (a single JS thread) — the point of
+        // `pure` here is that this is *safe* to run in any order/overlap,
+        // not that this VM actually does. Real thread parallelism is
+        // kestrelc's native backend only. Reuses execute() itself
+        // (JS-level recursion, one shallow level per element, not deep
+        // recursion) rather than duplicating the call machinery.
+        const arr = stack[--sp];
+        const calleeName = ins.a.name;
+        const result = new Array(arr.length);
+        for (let i = 0; i < arr.length; i++) {
+          result[i] = execute(functions, calleeName, [arr[i]], onPrint);
+        }
+        stack[sp++] = result;
+        ip++;
+        break;
+      }
       case OP.POP: sp--; ip++; break;
       case OP.JUMP: ip = ins.a; break;
       case OP.JUMP_IF_FALSE: {
@@ -883,6 +984,10 @@ function run(src, opts = {}) {
   if (purityErrors.length) {
     throw new KestrelError("Purity check failed:\n  " + purityErrors.join("\n  "));
   }
+  const pmapErrors = checkParallelMap(program);
+  if (pmapErrors.length) {
+    throw new KestrelError("parallel_map() check failed:\n  " + pmapErrors.join("\n  "));
+  }
   const boundsNotes = checkBounds(program);
   const result = interpret(program, opts);
   return { result, boundsNotes };
@@ -900,6 +1005,10 @@ function runFast(src, opts = {}) {
   if (purityErrors.length) {
     throw new KestrelError("Purity check failed:\n  " + purityErrors.join("\n  "));
   }
+  const pmapErrors = checkParallelMap(program);
+  if (pmapErrors.length) {
+    throw new KestrelError("parallel_map() check failed:\n  " + pmapErrors.join("\n  "));
+  }
   const boundsNotes = checkBounds(program);
   const functions = compile(program);
   const onPrint = opts.onPrint || ((s) => console.log(s));
@@ -910,7 +1019,7 @@ function runFast(src, opts = {}) {
 // Export for Node; in the browser this file is loaded as a plain
 // <script>, and `Kestrel` is used as a global instead.
 const Kestrel = {
-  lex, parse, checkPurity, checkBounds, interpret, run,
+  lex, parse, checkPurity, checkBounds, checkParallelMap, interpret, run,
   compile, execute, runFast,
   KestrelError,
 };

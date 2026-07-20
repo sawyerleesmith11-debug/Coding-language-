@@ -355,6 +355,72 @@ describe("interpreter / run()", () => {
   });
 });
 
+describe("parallel_map()", () => {
+  test("applies a pure function to every array element, in order", () => {
+    const { output } = runCollect(`
+      pure fn square(x: i32) -> i32 { return x * x; }
+      fn main() {
+        let nums = [1, 2, 3, 4, 5];
+        let squares = parallel_map(square, nums);
+        print(squares[0], squares[1], squares[2], squares[3], squares[4]);
+      }
+    `);
+    assert.deepEqual(output, ["1 4 9 16 25"]);
+  });
+
+  test("rejects a non-pure function", () => {
+    assert.throws(
+      () => Kestrel.run(`
+        fn notpure(x: i32) -> i32 { print(x); return x; }
+        fn main() { let a = [1, 2]; let b = parallel_map(notpure, a); print(b[0]); }
+      `),
+      /must be a 'pure fn'/
+    );
+  });
+
+  test("rejects a function that doesn't take exactly one parameter", () => {
+    assert.throws(
+      () => Kestrel.run(`
+        pure fn add(x: i32, y: i32) -> i32 { return x + y; }
+        fn main() { let a = [1, 2]; let b = parallel_map(add, a); print(b[0]); }
+      `),
+      /exactly one parameter/
+    );
+  });
+
+  test("rejects an unknown function name", () => {
+    assert.throws(
+      () => Kestrel.run(`fn main() { let a = [1, 2]; let b = parallel_map(nosuchfn, a); print(b[0]); }`),
+      /unknown function/
+    );
+  });
+
+  test("rejects a non-identifier first argument", () => {
+    assert.throws(
+      () => Kestrel.run(`
+        pure fn square(x: i32) -> i32 { return x * x; }
+        fn main() { let a = [1, 2]; let b = parallel_map(square(1), a); print(b[0]); }
+      `),
+      /bare function name/
+    );
+  });
+
+  test("is allowed inside a pure function too", () => {
+    const { result } = runCollect(`
+      pure fn square(x: i32) -> i32 { return x * x; }
+      pure fn sum_of_squares(nums: [i32; N]) -> i32 {
+        let squares = parallel_map(square, nums);
+        return squares[0] + squares[1] + squares[2];
+      }
+      fn main() {
+        let nums = [1, 2, 3];
+        return sum_of_squares(nums);
+      }
+    `);
+    assert.equal(result, 14);
+  });
+});
+
 describe("example programs", () => {
   const fs = require("node:fs");
   const path = require("node:path");
