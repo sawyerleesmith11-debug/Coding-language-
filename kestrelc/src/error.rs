@@ -13,6 +13,7 @@ use crate::span::Span;
 pub enum ErrorKind {
     Lex,
     Parse,
+    Resolve,
     Purity,
     ParallelMap,
     Type,
@@ -28,6 +29,7 @@ impl ErrorKind {
         match self {
             ErrorKind::Lex => "Lex error",
             ErrorKind::Parse => "Parse error",
+            ErrorKind::Resolve => "Name resolution failed",
             ErrorKind::Purity => "Purity check failed",
             ErrorKind::ParallelMap => "parallel_map() check failed",
             ErrorKind::Type => "Type check failed",

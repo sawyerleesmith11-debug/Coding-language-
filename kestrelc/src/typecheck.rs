@@ -42,8 +42,7 @@ impl Kind {
     }
 }
 
-pub fn check_types(program: &Program) -> Vec<KestrelcError> {
-    let fns: HashMap<Symbol, &Fn> = program.iter().map(|f| (f.name, f)).collect();
+pub fn check_types(program: &Program, fns: &HashMap<Symbol, &Fn>) -> Vec<KestrelcError> {
     let mut errors = Vec::new();
 
     fn is_numeric(k: Kind) -> bool {
@@ -250,7 +249,7 @@ pub fn check_types(program: &Program) -> Vec<KestrelcError> {
         let mut locals: HashMap<Symbol, Kind> = HashMap::new();
         let mut fn_errors = Vec::new();
         for s in &fn_.body {
-            visit_stmt(s, &mut locals, &fns, &mut fn_errors);
+            visit_stmt(s, &mut locals, fns, &mut fn_errors);
         }
         for e in fn_errors {
             errors.push(KestrelcError::new(e.kind, format!("in '{}': {}", fn_.name, e.message), e.span));
