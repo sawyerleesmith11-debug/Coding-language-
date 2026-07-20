@@ -529,3 +529,108 @@ fn wasm_backend_rejects_statically_provable_out_of_bounds_index_at_compile_time(
         "expected a compile-time bounds-proof error, got:\n{stderr}"
     );
 }
+
+#[test]
+fn native_compile_cache_hit_reuses_the_object_file_and_still_produces_correct_output() {
+    let scratch = scratch_dir("cache_native");
+    let cache_dir = scratch.join("cache");
+    let src = repo_root().join("examples").join("fibonacci.kes");
+
+    let first = Command::new(kestrelc_bin())
+        .arg(&src)
+        .current_dir(&scratch)
+        .env("KESTRELC_CACHE_DIR", &cache_dir)
+        .output()
+        .expect("failed to run kestrelc");
+    assert!(first.status.success(), "first compile failed:\n{}", String::from_utf8_lossy(&first.stderr));
+    assert!(
+        !String::from_utf8_lossy(&first.stdout).contains("(cached)"),
+        "first compile should be a cache miss"
+    );
+
+    let second = Command::new(kestrelc_bin())
+        .arg(&src)
+        .current_dir(&scratch)
+        .env("KESTRELC_CACHE_DIR", &cache_dir)
+        .output()
+        .expect("failed to run kestrelc");
+    assert!(second.status.success(), "second compile failed:\n{}", String::from_utf8_lossy(&second.stderr));
+    assert!(
+        String::from_utf8_lossy(&second.stdout).contains("(cached)"),
+        "second compile should be a cache hit, got:\n{}",
+        String::from_utf8_lossy(&second.stdout)
+    );
+
+    let bin_path = scratch.join("fibonacci");
+    let run = Command::new(&bin_path).output().expect("failed to run compiled binary");
+    assert!(run.status.success());
+    assert!(String::from_utf8_lossy(&run.stdout).starts_with("fib 0 = 0"));
+}
+
+#[test]
+fn wasm_compile_cache_hit_produces_byte_identical_output() {
+    let scratch = scratch_dir("cache_wasm");
+    let cache_dir = scratch.join("cache");
+    let src = repo_root().join("examples").join("fibonacci.kes");
+
+    for _ in 0..2 {
+        let out = Command::new(kestrelc_bin())
+            .arg("--wasm")
+            .arg(&src)
+            .current_dir(&scratch)
+            .env("KESTRELC_CACHE_DIR", &cache_dir)
+            .output()
+            .expect("failed to run kestrelc");
+        assert!(out.status.success(), "kestrelc --wasm failed:\n{}", String::from_utf8_lossy(&out.stderr));
+    }
+
+    // Confirm the second run really did hit the cache, not just happen
+    // to produce the same bytes independently.
+    let second = Command::new(kestrelc_bin())
+        .arg("--wasm")
+        .arg(&src)
+        .current_dir(&scratch)
+        .env("KESTRELC_CACHE_DIR", &cache_dir)
+        .output()
+        .expect("failed to run kestrelc");
+    assert!(
+        String::from_utf8_lossy(&second.stdout).contains("(cached)"),
+        "expected a cache hit by the third invocation"
+    );
+
+    let wasm_path = scratch.join("fibonacci.wasm");
+    let run = run_wasm_via_node(&wasm_path);
+    assert!(run.status.success(), "node failed to run the cached wasm module:\n{}", String::from_utf8_lossy(&run.stderr));
+    assert!(String::from_utf8_lossy(&run.stdout).starts_with("fib 0 = 0"));
+}
+
+#[test]
+fn compile_cache_misses_when_source_changes() {
+    let scratch = scratch_dir("cache_invalidation");
+    let cache_dir = scratch.join("cache");
+    let src_path = scratch.join("prog.kes");
+    std::fs::write(&src_path, "fn main() {\n    print(\"v1\");\n}\n").unwrap();
+
+    let first = Command::new(kestrelc_bin())
+        .arg("--wasm")
+        .arg(&src_path)
+        .current_dir(&scratch)
+        .env("KESTRELC_CACHE_DIR", &cache_dir)
+        .output()
+        .expect("failed to run kestrelc");
+    assert!(first.status.success());
+
+    std::fs::write(&src_path, "fn main() {\n    print(\"v2, a different program\");\n}\n").unwrap();
+    let second = Command::new(kestrelc_bin())
+        .arg("--wasm")
+        .arg(&src_path)
+        .current_dir(&scratch)
+        .env("KESTRELC_CACHE_DIR", &cache_dir)
+        .output()
+        .expect("failed to run kestrelc");
+    assert!(second.status.success());
+    assert!(
+        !String::from_utf8_lossy(&second.stdout).contains("(cached)"),
+        "changed source should not hit the previous entry's cache"
+    );
+}

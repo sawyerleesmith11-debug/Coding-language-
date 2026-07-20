@@ -51,6 +51,27 @@ system `cc` as the linker. Requires a working C toolchain (`cc`) on
 `PATH` — nothing else; Cranelift itself is a pure-Rust dependency with
 no system requirements beyond that.
 
+## Compile cache
+
+`kestrelc` caches its output across invocations, keyed by a content hash
+of the source text (plus which backend — native and `--wasm` cache
+separately). Compiling the exact same `.kes` file again — the common
+case during a dev loop, or every time the browser editor's native engine
+runs unchanged code — skips lexing/parsing/purity-checking/codegen
+entirely and reuses the cached artifact; the output line says
+`(cached)` when this happens. Any edit to the source is a different
+hash, so it's always a correctness-safe cache: a hit only ever happens
+for byte-identical input.
+
+Cache location: `$KESTRELC_CACHE_DIR`, else `$XDG_CACHE_HOME/kestrelc`,
+else `$HOME/.cache/kestrelc`, else caching is silently skipped (compiles
+still work, just without the speedup). Delete the directory to clear it.
+See `src/cache.rs` for the implementation, and
+`kestrel-DESIGN.md`'s idea #1 for how this relates to (and how it's
+scoped down from) the fuller runtime-profile-guided cache described
+there — this is "skip redundant recompilation," not (yet) branch/shape
+profiling or speculative pre-specialization.
+
 ## Scope
 
 kestrelc's front end (lexer, parser, purity checker) is a complete port

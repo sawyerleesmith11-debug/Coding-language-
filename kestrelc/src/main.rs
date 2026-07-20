@@ -1,4 +1,4 @@
-use kestrelc::{codegen, lexer, parser, purity, wasm_codegen};
+use kestrelc::{cache, codegen, lexer, parser, purity, wasm_codegen};
 
 use std::fs;
 use std::path::Path;
@@ -21,6 +21,31 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+
+    let src_path = Path::new(&path);
+    let stem = src_path.file_stem().unwrap().to_string_lossy();
+
+    // A persistent, cross-invocation cache: if this exact source text
+    // (for this exact backend) has compiled successfully before, skip
+    // lexing/parsing/purity-checking/codegen entirely and reuse the
+    // artifact. See kestrelc/src/cache.rs for the scope and the honest
+    // gap between this and kestrel-DESIGN.md idea #1's full vision.
+    let cache_mode = if wasm { "wasm" } else { "native" };
+    let cache_key = cache::key(&src, cache_mode);
+    let cache_ext = if wasm { "wasm" } else { "o" };
+    if let Some(cached) = cache::read(&cache_key, cache_ext) {
+        if wasm {
+            let out_path = format!("{stem}.wasm");
+            if let Err(e) = fs::write(&out_path, &cached) {
+                eprintln!("kestrelc: failed to write '{out_path}': {e}");
+                return ExitCode::FAILURE;
+            }
+            println!("kestrelc: wrote ./{out_path} (cached)");
+            return ExitCode::SUCCESS;
+        } else {
+            return link_and_report(&cached, &stem, true);
+        }
+    }
 
     let tokens = match lexer::lex(&src) {
         Ok(t) => t,
@@ -52,9 +77,6 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    let src_path = Path::new(&path);
-    let stem = src_path.file_stem().unwrap().to_string_lossy();
-
     if wasm {
         let bytes = match wasm_codegen::compile_to_wasm(&program) {
             Ok(b) => b,
@@ -68,6 +90,7 @@ fn main() -> ExitCode {
             eprintln!("kestrelc: failed to write '{out_path}': {e}");
             return ExitCode::FAILURE;
         }
+        cache::write(&cache_key, cache_ext, &bytes);
         println!("kestrelc: wrote ./{out_path}");
         return ExitCode::SUCCESS;
     }
@@ -84,24 +107,30 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     let object_bytes = cg.finish();
+    cache::write(&cache_key, cache_ext, &object_bytes);
+    link_and_report(&object_bytes, &stem, false)
+}
 
+/// Writes `object_bytes` to `<stem>.o` and links it into `<stem>` with
+/// the system `cc`. Shared by the normal compile path and the
+/// cache-hit path (which skips straight here with a previously-cached
+/// object file) — linking is cheap enough, and simple enough as "just
+/// invoke the system linker," that it isn't itself worth caching
+/// separately from the object file.
+fn link_and_report(object_bytes: &[u8], stem: &str, from_cache: bool) -> ExitCode {
     let obj_path = format!("{stem}.o");
     let out_path = stem.to_string();
 
-    if let Err(e) = fs::write(&obj_path, &object_bytes) {
+    if let Err(e) = fs::write(&obj_path, object_bytes) {
         eprintln!("kestrelc: failed to write '{obj_path}': {e}");
         return ExitCode::FAILURE;
     }
 
-    let link_status = Command::new("cc")
-        .arg(&obj_path)
-        .arg("-o")
-        .arg(&out_path)
-        .status();
+    let link_status = Command::new("cc").arg(&obj_path).arg("-o").arg(&out_path).status();
 
     match link_status {
         Ok(status) if status.success() => {
-            println!("kestrelc: wrote ./{out_path}");
+            println!("kestrelc: wrote ./{out_path}{}", if from_cache { " (cached)" } else { "" });
             ExitCode::SUCCESS
         }
         Ok(status) => {

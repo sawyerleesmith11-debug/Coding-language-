@@ -5,6 +5,8 @@ pub mod purity;
 pub mod wasm_codegen;
 
 #[cfg(feature = "native")]
+pub mod cache;
+#[cfg(feature = "native")]
 pub mod codegen;
 
 /// Runs the full front end (lex, parse, purity check) then the WASM

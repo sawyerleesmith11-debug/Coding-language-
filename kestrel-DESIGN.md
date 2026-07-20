@@ -12,7 +12,7 @@ that haven't been tried together in one language. Both are marked below.
 ---
 
 ## 1. Persistent cross-run optimization cache
-**Status: novel combination**
+**Status: novel combination — first (scoped-down) step implemented**
 
 Most languages force a choice:
 - **AOT (ahead-of-time) compilation** — compile once, run fast, but the
@@ -32,6 +32,23 @@ paying the warmup cost more than once per machine.
 Trade-off to be honest about: this only helps for programs run
 repeatedly on the same machine (servers, CLIs, dev loops) — a one-shot
 script gets no benefit.
+
+**What's actually implemented is a smaller, real first step, not this
+full vision:** `kestrelc` now has a persistent, on-disk, cross-invocation
+*compile* cache (`kestrelc/src/cache.rs`) — if the exact same source text
+has compiled successfully before, a later `kestrelc` invocation skips
+lexing/parsing/purity-checking/codegen entirely and reuses the cached
+artifact (object file for the native backend, `.wasm` bytes for the WASM
+one), keyed by a content hash of the source. This is the boring, honest
+80%: "don't redo work you've already done," not runtime branch/shape
+profiling or speculative pre-specialization — no execution feedback loop
+exists yet. `kestrel-editor.html`'s native engine has the same idea at a
+smaller, session-only scale: an in-memory `Map` keyed by source text, so
+clicking Run repeatedly on unchanged code skips recompilation without
+needing a filesystem (the browser's `kestrelc-web` has none). Real,
+measured win either way — e.g. a cached `kestrelc-web` compile in the
+editor dropped from ~22ms to ~0.6ms — but the actual profile-guided
+pre-specialization described above is still future work.
 
 ## 2. Effect-tracked purity
 **Status: extension of known ideas (Haskell's purity + Rust's ownership)**
@@ -260,14 +277,15 @@ The honest caveats: `kestrelc` (both the native and WASM backends,
 including `kestrelc-web`) only supports integers, `if`/`while`,
 functions/recursion, `print`, and arrays so far — no strings as general
 values, and cross-function `where`-clause bounds elision is native-only
-for now (see `kestrelc/README.md` for the exact scope and why). And the
-*interesting* ideas in this document — the persistent cache, layout
-polymorphism, a more general proof system beyond array bounds — aren't
-implemented in `kestrelc` at all yet; this
-is "compile straight to machine code with a mature, off-the-shelf
-optimizing backend," not yet "compile *smarter* than a normal compiler
-would." That's the honest ceiling of what's measured here, and also
-exactly where the next work goes.
+for now (see `kestrelc/README.md` for the exact scope and why). And most
+of the *interesting* ideas in this document — layout polymorphism, a
+more general proof system beyond array bounds — aren't implemented in
+`kestrelc` at all yet (the persistent cache has a real first step now,
+see idea #1 above, but not its full runtime-profile-guided vision); this
+is still mostly "compile straight to machine code with a mature,
+off-the-shelf optimizing backend," not yet "compile *smarter* than a
+normal compiler would." That's the honest ceiling of what's measured
+here, and also exactly where the next work goes.
 
 Not yet implemented (future work, roughly in priority order):
 1. Proof-based bounds-check *elision* in `kestrelc` — **the design
@@ -286,7 +304,9 @@ Not yet implemented (future work, roughly in priority order):
    is native-only so far — the WASM backend (`kestrelc --wasm` /
    `kestrelc-web`) has array support too, but still runtime-checks
    `where`-guarded accesses rather than eliding them.
-2. The persistent cross-run optimization cache, built on top of `kestrelc`
+2. The full runtime-profile-guided version of the persistent cache (idea
+   #1) — the on-disk/in-memory *compile-result* cache is done; branch/
+   shape profiling and pre-specialization from it are not
 3. Layout polymorphism
 4. A more general proof system beyond simple bounds checks
 5. CPU-side parallelism for `pure` functions over collections (idea #5)

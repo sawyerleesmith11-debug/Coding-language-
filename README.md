@@ -72,8 +72,11 @@ full benchmark writeup and methodology. And `kestrelc` itself now also
 compiles to WASM (both as a `kestrelc --wasm` output target, and as
 `kestrelc-web` — the compiler itself running in the browser) so that
 same near-native speed is available directly in `kestrel-editor.html`,
-no server or native binary required — pick "engine: native (wasm)". Next
-up, in priority order: closing the last `kestrelc`/WASM scope gaps
-(arrays in the WASM backend), the persistent cross-run optimization
-cache, layout polymorphism, a more general proof system, and CPU
-parallelism for `pure` functions.
+no server or native binary required — pick "engine: native (wasm)", now
+with array support there too. `kestrelc` also has a persistent,
+cross-invocation compile cache now (skips redundant recompilation of
+unchanged source — see `kestrelc/README.md`), though not yet the fuller
+runtime-profile-guided version `kestrel-DESIGN.md` describes. Next up,
+in priority order: that fuller profile-guided cache, layout
+polymorphism, a more general proof system, and CPU parallelism for
+`pure` functions.

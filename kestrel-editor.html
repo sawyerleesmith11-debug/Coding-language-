@@ -1330,32 +1330,60 @@ function loadCompiler() {
   return compilerPromise;
 }
 
+// Compile-result cache, keyed by the exact source text: clicking Run
+// repeatedly without editing (the common case) skips straight to
+// instantiating the previous result instead of re-invoking the
+// compiler. Session-scoped only (an in-memory Map, cleared on reload) —
+// a lighter cousin of kestrelc's own on-disk cache (kestrelc/src/cache.rs)
+// for the same reason: this is a "skip redundant recompilation" cache,
+// not yet the runtime-profile-guided pre-specialization
+// kestrel-DESIGN.md idea #1 originally describes. Caches both outcomes
+// (success and compile error) since re-running broken code without
+// fixing it first is common while iterating too.
+const compileCache = new Map(); // source text -> { ok, data: Uint8Array }
+
+async function compileNative(compiler, src) {
+  if (compileCache.has(src)) {
+    return { result: compileCache.get(src), cached: true };
+  }
+  const mem = compiler.exports.memory;
+
+  const srcBytes = new TextEncoder().encode(src);
+  const srcPtr = compiler.exports.alloc(srcBytes.length);
+  new Uint8Array(mem.buffer, srcPtr, srcBytes.length).set(srcBytes);
+
+  const headerPtr = compiler.exports.compile(srcPtr, srcBytes.length);
+  // mem.buffer may have been detached/regrown by allocations during
+  // compile(), so re-view it fresh before reading the header.
+  const header = new DataView(mem.buffer, headerPtr, 9);
+  const ok = header.getUint8(0) === 1;
+  const dataLen = header.getUint32(1, true);
+  const dataPtr = header.getUint32(5, true);
+  // .slice() copies out of the compiler's live memory, so the result is
+  // safe to hold in the cache past this call (and past any future
+  // memory.grow on the compiler instance).
+  const data = new Uint8Array(mem.buffer.slice(dataPtr, dataPtr + dataLen));
+  compiler.exports.dealloc(srcPtr, srcBytes.length);
+  compiler.exports.dealloc(dataPtr, dataLen);
+  compiler.exports.dealloc(headerPtr, 9);
+
+  const result = { ok, data };
+  compileCache.set(src, result);
+  return { result, cached: false };
+}
+
 async function runNative() {
   const start = performance.now();
   try {
     const compiler = await loadCompiler();
-    const mem = compiler.exports.memory;
-
-    const srcBytes = new TextEncoder().encode(codeEl.value);
-    const srcPtr = compiler.exports.alloc(srcBytes.length);
-    new Uint8Array(mem.buffer, srcPtr, srcBytes.length).set(srcBytes);
-
-    const headerPtr = compiler.exports.compile(srcPtr, srcBytes.length);
-    // mem.buffer may have been detached/regrown by allocations during
-    // compile(), so re-view it fresh before reading the header.
-    const header = new DataView(mem.buffer, headerPtr, 9);
-    const ok = header.getUint8(0) === 1;
-    const dataLen = header.getUint32(1, true);
-    const dataPtr = header.getUint32(5, true);
-    const data = new Uint8Array(mem.buffer.slice(dataPtr, dataPtr + dataLen));
-    compiler.exports.dealloc(srcPtr, srcBytes.length);
-    compiler.exports.dealloc(dataPtr, dataLen);
-    compiler.exports.dealloc(headerPtr, 9);
+    const { result, cached } = await compileNative(compiler, codeEl.value);
+    const { ok, data } = result;
+    const tag = cached ? 'native, cached' : 'native';
 
     if (!ok) {
       const elapsed = performance.now() - start;
       printLine(new TextDecoder().decode(data), 'err');
-      printLine(`— failed after ${formatElapsed(elapsed)} (native) —`, 'err');
+      printLine(`— failed after ${formatElapsed(elapsed)} (${tag}) —`, 'err');
       return;
     }
 
@@ -1375,7 +1403,7 @@ async function runNative() {
     instance.exports.main();
 
     const elapsed = performance.now() - start;
-    printLine(`— finished in ${formatElapsed(elapsed)} (native) —`, 'ok');
+    printLine(`— finished in ${formatElapsed(elapsed)} (${tag}) —`, 'ok');
   } catch (e) {
     const elapsed = performance.now() - start;
     printLine((e && e.message) ? e.message : String(e), 'err');
