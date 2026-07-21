@@ -1,6 +1,7 @@
 node_modules/
 *.log
 .DS_Store
+.worktrees/
 
 # Generic "Claude Token Optimizer" boilerplate (from a global tool, not
 # authored for this repo) and personal scratch notes — not project content.
