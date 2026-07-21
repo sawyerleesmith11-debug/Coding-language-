@@ -2124,3 +2124,29 @@ fn watch_rejects_a_nonexistent_file_immediately_without_hanging() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("No such file or directory"), "got: {stderr}");
 }
+
+#[test]
+fn rejects_an_array_literal_too_large_to_safely_compile() {
+    // Generates the literal mechanically -- 12,500,001 elements is
+    // one past the 100MB (12,500,000 * 8 bytes) cap.
+    let scratch = scratch_dir("huge_array_literal");
+    let src_path = scratch.join("prog.kes");
+    let mut src = String::from("fn main() {\n    let arr = [");
+    for i in 0..12_500_001u32 {
+        if i > 0 {
+            src.push_str(", ");
+        }
+        src.push('0');
+    }
+    src.push_str("];\n    print(arr[0]);\n}\n");
+    fs::write(&src_path, src).unwrap();
+
+    let out = Command::new(kestrelc_bin())
+        .arg(&src_path)
+        .current_dir(&scratch)
+        .output()
+        .expect("failed to run kestrelc");
+    assert!(!out.status.success(), "expected a compile error for an oversized array literal");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("too large to compile"), "got: {stderr}");
+}

@@ -182,6 +182,24 @@ fn resolve_expr(
             }
         }
         ExprKind::ArrayLit(elems) => {
+            // 100MB / 8 bytes per i64 element. A safety net against a
+            // literal so large it would itself cause compile-time or
+            // runtime memory problems regardless of allocation
+            // strategy -- not a meaningful limit for any real program
+            // (see codegen.rs's heap-allocation threshold at 4KB for
+            // where the *normal* large-array path kicks in well below
+            // this cap).
+            const MAX_ARRAY_LITERAL_ELEMENTS: usize = 12_500_000;
+            if elems.len() > MAX_ARRAY_LITERAL_ELEMENTS {
+                errors.push(KestrelcError::new(
+                    ErrorKind::Resolve,
+                    format!(
+                        "array literal with {} elements is too large to compile (over 100MB) — this is almost certainly a mistake",
+                        elems.len()
+                    ),
+                    e.span,
+                ));
+            }
             for el in elems {
                 resolve_expr(el, locals, struct_locals, fns, structs, span, errors);
             }
