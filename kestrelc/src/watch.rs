@@ -248,13 +248,19 @@ fn report_error(src: &str, path: &str, e: &KestrelcError) {
     }
 }
 
-/// Matches main.rs's own report_many exactly, same reason as report_error.
+/// Matches main.rs's own report_many exactly (header line, then each
+/// error indented two spaces with no repeated "kestrelc:" prefix -- NOT
+/// report_error's single-error formatting), same reason as report_error.
 fn report_errors(src: &str, path: &str, errors: &[KestrelcError]) {
     if let Some(first) = errors.first() {
         eprintln!("kestrelc: {}:", first.kind.label());
     }
     for e in errors {
-        report_error(src, path, e);
+        if e.span.line == 0 {
+            eprintln!("  {}", e.message);
+        } else {
+            eprintln!("  {}", format_diagnostic(src, path, e.span.line, e.span.col, e.span.len.max(1), &e.message));
+        }
     }
 }
 

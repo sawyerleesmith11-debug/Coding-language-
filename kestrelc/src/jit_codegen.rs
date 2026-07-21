@@ -70,6 +70,22 @@ pub fn check_jit_supported(program: &Program) -> Result<(), KestrelcError> {
                 ));
             }
         }
+        // finish_and_run transmutes the finalized function pointer to a
+        // fixed, zero-parameter `extern "C" fn() -> i64` -- that's only
+        // sound if `main` truly takes zero parameters. Nothing in the
+        // front end rejects `fn main(x: i64)` (every existing check only
+        // verifies `main` *exists*, never its arity, since main is never
+        // called from within the program itself for typecheck.rs's
+        // argument-count check to catch), so this must be checked here,
+        // explicitly, rather than merely asserted in a comment next to
+        // the transmute.
+        if &*f.name.resolve() == "main" && !f.params.is_empty() {
+            return Err(KestrelcError::new(
+                ErrorKind::Codegen,
+                "kestrelc watch: 'main' can't take parameters".to_string(),
+                f.span,
+            ));
+        }
         check_stmts_supported(&f.body)?;
     }
     Ok(())
@@ -306,11 +322,14 @@ impl JitCodegen {
             .get(&crate::interner::intern("main"))
             .ok_or_else(|| KestrelcError::internal(ErrorKind::Codegen, "no 'main' function found".to_string()))?;
         let code_ptr = self.module.get_finalized_function(main_id);
-        // Safety: `main`'s Cranelift signature (declared above, zero
-        // params, one i64 return) exactly matches this transmuted Rust
-        // fn-pointer type -- both are built from the same fn_signature
-        // call for the same AST node, so there's no possibility of an
-        // ABI mismatch between what was declared and what's called here.
+        // Safety: this transmute assumes `main` takes zero parameters --
+        // true because check_jit_supported (called before any of this
+        // runs -- see try_jit in watch.rs) explicitly rejects `main`
+        // having any parameters, not merely because fn_signature happens
+        // to produce a matching shape (fn_signature pushes one AbiParam
+        // per f.params for *any* function, main included, so without
+        // that separate check this transmute's soundness would rest on
+        // an unenforced assumption, not a real guarantee).
         let main_fn: extern "C" fn() -> i64 = unsafe { std::mem::transmute(code_ptr) };
         let result = main_fn();
         // See this file's module doc comment: printf's C-runtime stdout
@@ -628,6 +647,46 @@ mod tests {
         let mut cg = JitCodegen::new().unwrap();
         cg.compile_program(&program).unwrap();
         cg.finish_and_run().unwrap()
+    }
+
+    #[test]
+    fn print_runs_without_crashing_and_flushes_correctly() {
+        // The feature's main event and its only real FFI/ABI boundary
+        // (printf, called through a JIT-registered symbol, plus the
+        // fflush call afterward) -- flagged in review as the biggest
+        // coverage gap: neither of the other tests ever calls print, so
+        // this path had zero automated coverage. Asserting captured
+        // stdout is awkward for an in-process printf call (it writes to
+        // the C runtime's own stdout handle, not something the Rust test
+        // harness easily intercepts), so this asserts what actually
+        // matters for regression protection: the full print -> printf ->
+        // fflush path executes to completion, with a mix of string and
+        // numeric arguments (exercising both call_printf's literal-text
+        // and %lld-formatted paths), multiple print statements in a row
+        // (exercising str_cache/str_counter across more than one call),
+        // and returns the expected value afterward -- if the FFI
+        // signature or symbol registration were wrong, this would
+        // reliably crash rather than silently pass.
+        let result = jit_run(
+            "fn main() {\n\
+             \x20   print(\"hello\", 42, \"world\");\n\
+             \x20   print(7);\n\
+             \x20   print();\n\
+             \x20   return 99;\n\
+             }\n",
+        );
+        assert_eq!(result, 99);
+    }
+
+    #[test]
+    fn main_with_parameters_is_rejected_with_a_clear_message() {
+        // Regression test for the review finding: finish_and_run
+        // transmutes to a fixed zero-parameter function pointer, which
+        // is only sound if main truly takes no parameters -- this proves
+        // that's actually enforced, not just asserted in a comment.
+        let program = parse(lex("fn main(x: i64) -> i64 { return x; }").unwrap()).unwrap();
+        let err = check_jit_supported(&program).unwrap_err();
+        assert!(err.message.contains("'main' can't take parameters"), "got: {}", err.message);
     }
 
     #[test]
