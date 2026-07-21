@@ -2183,24 +2183,29 @@ fn a_small_array_literal_at_the_stack_heap_boundary_still_works() {
 #[test]
 fn a_large_array_literal_above_the_threshold_heap_allocates_instead_of_crashing() {
     // This is the direct regression test for the crash found in
-    // benchmarks/results.md: a 500,000-element i64 array literal (4MB) reliably
-    // crashed with STATUS_STACK_OVERFLOW before this fix when run on Windows'
-    // default ~1MB thread stack. Previous version used 20,000 elements (160KB),
-    // which is small enough to fit inside the 1MB stack even without the fix, so
-    // it never triggered the crash and was a false negative. This version uses
-    // 100,000 elements (800KB), which is above the 4KB threshold and tests the
-    // heap-allocation path of the fix (FnCodegen::alloc_array_buffer). Larger
-    // sizes (200,000+ elements / 1.6MB+) cause actual stack overflow without the fix.
+    // benchmarks/results.md: an array literal large enough to exceed
+    // Windows' default ~1MB thread stack reliably crashed with
+    // STATUS_STACK_OVERFLOW before this fix. 300,000 elements (2.4MB) is
+    // safely above the empirically-confirmed ~1.6MB threshold where this
+    // system's default stack actually overflows -- verified directly: the
+    // pre-fix codegen genuinely crashes with STATUS_STACK_OVERFLOW at this
+    // size (with a freshly-cleared compile cache -- kestrelc's on-disk
+    // cache is keyed by source content only, not by which compiler binary
+    // produced it, so swapping codegen.rs without clearing
+    // $HOME/.cache/kestrelc or $USERPROFILE/.cache/kestrelc between
+    // before/after runs silently serves a stale cached result instead of
+    // re-testing), and the post-fix codegen (FnCodegen::alloc_array_buffer)
+    // genuinely passes.
     let scratch = scratch_dir("large_array_literal");
     let src_path = scratch.join("prog.kes");
     let mut src = String::from("fn main() {\n    let arr = [");
-    for i in 0..100_000u32 {
+    for i in 0..300_000u32 {
         if i > 0 {
             src.push_str(", ");
         }
         src.push_str(&i.to_string());
     }
-    src.push_str("];\n    let total = 0;\n    let i = 0;\n    while (i < 100000) {\n        total = total + arr[i];\n        i = i + 1;\n    }\n    print(total);\n}\n");
+    src.push_str("];\n    let total = 0;\n    let i = 0;\n    while (i < 300000) {\n        total = total + arr[i];\n        i = i + 1;\n    }\n    print(total);\n}\n");
     fs::write(&src_path, src).unwrap();
 
     let out = Command::new(kestrelc_bin())
@@ -2221,6 +2226,6 @@ fn a_large_array_literal_above_the_threshold_heap_allocates_instead_of_crashing(
         stdout,
         String::from_utf8_lossy(&run.stderr)
     );
-    // sum of 0..100000 = 100000*99999/2 = 4999950000
-    assert_eq!(stdout, "4999950000\n");
+    // sum of 0..300000 = 300000*299999/2 = 44999850000
+    assert_eq!(stdout, "44999850000\n");
 }
