@@ -37,7 +37,7 @@ use std::collections::{HashMap, HashSet};
 /// is what actually reports that as an error; this just mirrors the
 /// same fallback behavior for the table itself.
 pub fn build_fn_table(program: &Program) -> HashMap<Symbol, &Fn> {
-    program.iter().map(|f| (f.name, f)).collect()
+    program.fns.iter().map(|f| (f.name, f)).collect()
 }
 
 /// Resolves every name in `program` against `fns` (see `build_fn_table`)
@@ -47,7 +47,7 @@ pub fn build_fn_table(program: &Program) -> HashMap<Symbol, &Fn> {
 pub fn resolve(program: &Program, fns: &HashMap<Symbol, &Fn>) -> Vec<KestrelcError> {
     let mut errors = Vec::new();
     check_duplicate_fns(program, &mut errors);
-    for fn_ in program {
+    for fn_ in &program.fns {
         resolve_fn(fn_, fns, &mut errors);
     }
     errors
@@ -55,7 +55,7 @@ pub fn resolve(program: &Program, fns: &HashMap<Symbol, &Fn>) -> Vec<KestrelcErr
 
 fn check_duplicate_fns(program: &Program, errors: &mut Vec<KestrelcError>) {
     let mut seen: HashSet<Symbol> = HashSet::new();
-    for f in program {
+    for f in &program.fns {
         if !seen.insert(f.name) {
             errors.push(KestrelcError::new(
                 ErrorKind::Resolve,

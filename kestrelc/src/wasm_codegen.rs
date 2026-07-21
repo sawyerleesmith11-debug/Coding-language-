@@ -70,7 +70,7 @@ pub fn compile_to_wasm(program: &Program) -> Result<Vec<u8>, KestrelcError> {
     // length), matching the native backend's two AbiParams per array.
     let mut fn_indices: HashMap<Symbol, u32> = HashMap::new();
     let mut where_infos: HashMap<Symbol, WhereInfo> = HashMap::new();
-    for (i, f) in program.iter().enumerate() {
+    for (i, f) in program.fns.iter().enumerate() {
         let mut params = Vec::with_capacity(f.params.len());
         for p in &f.params {
             match &p.ty {
@@ -93,7 +93,7 @@ pub fn compile_to_wasm(program: &Program) -> Result<Vec<u8>, KestrelcError> {
         }
     }
 
-    for f in program {
+    for f in &program.fns {
         let my_where = where_infos.get(&f.name);
         let body = gen_fn(f, &fn_indices, &where_infos, my_where, &mut data_bytes, &mut str_offsets)?;
         code.function(&body);

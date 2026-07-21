@@ -62,11 +62,11 @@ impl Parser {
     }
 
     pub fn parse_program(&mut self) -> PResult<Program> {
-        let mut items = Vec::new();
+        let mut fns = Vec::new();
         while !self.at(&Tok::Eof) {
-            items.push(self.parse_fn_decl()?);
+            fns.push(self.parse_fn_decl()?);
         }
-        Ok(items)
+        Ok(Program { fns, structs: Vec::new() })
     }
 
     fn parse_type(&mut self) -> PResult<Type> {

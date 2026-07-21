@@ -135,7 +135,7 @@ pub fn check_purity(program: &Program, fns: &HashMap<Symbol, &Fn>) -> Vec<Kestre
     }
 
     let mut errors = Vec::new();
-    for fn_ in program {
+    for fn_ in &program.fns {
         if fn_.pure {
             let mut stack = HashSet::new();
             if is_impure(fn_, fns, &mut impure_cache, &mut stack) {
@@ -261,7 +261,7 @@ pub fn check_parallel_map(program: &Program, fns: &HashMap<Symbol, &Fn>) -> Vec<
         }
     }
 
-    for fn_ in program {
+    for fn_ in &program.fns {
         for s in &fn_.body {
             visit_stmt(s, fns, &mut errors);
         }

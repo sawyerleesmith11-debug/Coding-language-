@@ -130,7 +130,7 @@ fn infer_array_param_lengths(program: &Program) -> HashMap<Symbol, Vec<usize>> {
     // declaration order — both to size each function's proof vector and
     // to know which call-site argument positions actually matter.
     let array_positions: HashMap<Symbol, Vec<usize>> = program
-        .iter()
+        .fns.iter()
         .map(|f| {
             let positions = f
                 .params
@@ -238,7 +238,7 @@ fn infer_array_param_lengths(program: &Program) -> HashMap<Symbol, Vec<usize>> {
         }
     }
 
-    for f in program {
+    for f in &program.fns {
         // A bare array *parameter* (not a `let`) never has a
         // compile-time-known length here — only `let`-bound literal or
         // literal-length-derived locals do (matching
@@ -475,7 +475,7 @@ impl Codegen {
         // Pass 1: declare every function's signature so calls (including
         // forward references and recursion) can be resolved regardless
         // of source order.
-        for f in program {
+        for f in &program.fns {
             if f.pure && &*f.name.resolve() != "main" && !pmap_callbacks.contains(&f.name) && !f.params.is_empty() {
                 let has_array_params = f.params.iter().any(|p| matches!(p.ty, Type::Array { .. }));
                 // Either every parameter is scalar (the original,
@@ -545,7 +545,7 @@ impl Codegen {
         }
 
         // Pass 2: generate bodies.
-        for f in program {
+        for f in &program.fns {
             self.compile_fn(f)?;
         }
         Ok(())

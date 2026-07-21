@@ -94,7 +94,7 @@ pub fn compile_to_wasm_bytes(src: &str) -> Result<Vec<u8>, String> {
         return Err(format!("Type check failed:\n  {}", msgs.join("\n  ")));
     }
 
-    if !program.iter().any(|f| &*f.name.resolve() == "main") {
+    if !program.fns.iter().any(|f| &*f.name.resolve() == "main") {
         return Err("No 'main' function found".to_string());
     }
 

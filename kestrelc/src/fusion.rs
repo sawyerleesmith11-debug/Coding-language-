@@ -269,15 +269,15 @@ fn fuse_body(
 }
 
 pub fn fuse_loops(program: &Program) -> Program {
-    let mut fns: HashMap<Symbol, Fn> = program.iter().map(|f| (f.name, f.clone())).collect();
+    let mut fns: HashMap<Symbol, Fn> = program.fns.iter().map(|f| (f.name, f.clone())).collect();
     let mut extra_fns: Vec<Fn> = Vec::new();
     let mut counter: usize = 0;
 
     let mut new_program: Program = program.clone();
-    for f in new_program.iter_mut() {
+    for f in new_program.fns.iter_mut() {
         fuse_body(&mut f.body, &mut fns, &mut extra_fns, &mut counter);
     }
-    new_program.extend(extra_fns);
+    new_program.fns.extend(extra_fns);
     new_program
 }
 
@@ -305,8 +305,8 @@ mod tests {
             ",
         );
         let fused = fuse_loops(&program);
-        assert_eq!(fused.len(), 4, "should have added exactly one fused function");
-        assert!(fused.iter().any(|f| f.name.resolve().starts_with("__fused_")));
+        assert_eq!(fused.fns.len(), 4, "should have added exactly one fused function");
+        assert!(fused.fns.iter().any(|f| f.name.resolve().starts_with("__fused_")));
     }
 
     #[test]
@@ -326,7 +326,7 @@ mod tests {
         );
         let fused = fuse_loops(&program);
         // 3 originals + main + two fusion stages collapsing down to one.
-        assert_eq!(fused.len(), 6);
+        assert_eq!(fused.fns.len(), 6);
     }
 
     #[test]
@@ -343,7 +343,7 @@ mod tests {
             ",
         );
         let fused = fuse_loops(&program);
-        assert_eq!(fused.len(), 3, "no fused function should be added");
+        assert_eq!(fused.fns.len(), 3, "no fused function should be added");
     }
 
     #[test]
@@ -371,12 +371,12 @@ mod tests {
             "#,
         );
         let fused = fuse_loops(&program);
-        assert_eq!(fused.len(), 4, "should have added exactly one fused function");
-        assert!(fused.iter().any(|f| f.name.resolve().starts_with("__fused_")));
+        assert_eq!(fused.fns.len(), 4, "should have added exactly one fused function");
+        assert!(fused.fns.iter().any(|f| f.name.resolve().starts_with("__fused_")));
         // The interposed print must still be there, untouched, and must
         // still be the statement right after whatever now occupies the
         // fused `let a = ...`'s old slot.
-        let main_fn = fused.iter().find(|f| &*f.name.resolve() == "main").unwrap();
+        let main_fn = fused.fns.iter().find(|f| &*f.name.resolve() == "main").unwrap();
         assert!(matches!(&main_fn.body[2], Stmt::Print { .. }), "interposed print should be preserved in place");
     }
 
@@ -400,7 +400,7 @@ mod tests {
             "#,
         );
         let fused = fuse_loops(&program);
-        assert_eq!(fused.len(), 3, "no fused function should be added");
+        assert_eq!(fused.fns.len(), 3, "no fused function should be added");
     }
 
     #[test]
@@ -415,6 +415,6 @@ mod tests {
             ",
         );
         let fused = fuse_loops(&program);
-        assert_eq!(fused.len(), 2);
+        assert_eq!(fused.fns.len(), 2);
     }
 }

@@ -247,7 +247,7 @@ pub fn check_types(program: &Program, fns: &HashMap<Symbol, &Fn>) -> Vec<Kestrel
         }
     }
 
-    for fn_ in program {
+    for fn_ in &program.fns {
         let mut locals: HashMap<Symbol, Kind> = HashMap::new();
         let mut fn_errors = Vec::new();
         for s in &fn_.body {

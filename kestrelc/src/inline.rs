@@ -137,7 +137,7 @@ pub(crate) fn collect_parallel_map_callbacks(program: &Program) -> HashSet<Symbo
             }
         }
     }
-    for f in program {
+    for f in &program.fns {
         walk_stmts_exprs(&f.body, &mut |e| note_calls(e, &mut callbacks));
     }
     callbacks
@@ -266,7 +266,7 @@ pub fn inline_hot_fns(program: &Program, profile: &HashMap<String, u64>) -> Prog
     }
     let pmap_callbacks = collect_parallel_map_callbacks(program);
     let mut candidates: HashMap<Symbol, Candidate> = HashMap::new();
-    for f in program {
+    for f in &program.fns {
         if !f.pure || &*f.name.resolve() == "main" || pmap_callbacks.contains(&f.name) {
             continue;
         }
@@ -286,10 +286,10 @@ pub fn inline_hot_fns(program: &Program, profile: &HashMap<String, u64>) -> Prog
     if candidates.is_empty() {
         return program.clone();
     }
-    program
-        .iter()
-        .map(|f| Fn { body: inline_stmts(&f.body, &candidates), ..f.clone() })
-        .collect()
+    Program {
+        fns: program.fns.iter().map(|f| Fn { body: inline_stmts(&f.body, &candidates), ..f.clone() }).collect(),
+        structs: program.structs.clone(),
+    }
 }
 
 #[cfg(test)]
@@ -309,11 +309,11 @@ mod tests {
         let mut profile = HashMap::new();
         profile.insert("double".to_string(), 10);
         let out = inline_hot_fns(&program, &profile);
-        let main_fn = out.iter().find(|f| &*f.name.resolve() == "main").unwrap();
+        let main_fn = out.fns.iter().find(|f| &*f.name.resolve() == "main").unwrap();
         let double_sym = crate::interner::intern("double");
         match &main_fn.body[0] {
             Stmt::Let { value, .. } => {
-                assert!(!calls_name(value, double_sym), "expected 'double' inlined away, got {value:?}");
+                assert!(!calls_name(&value, double_sym), "expected 'double' inlined away, got {value:?}");
             }
             other => panic!("expected a let, got {other:?}"),
         }
@@ -327,10 +327,10 @@ mod tests {
         let mut profile = HashMap::new();
         profile.insert("double".to_string(), 1); // below HOT_CALL_THRESHOLD
         let out = inline_hot_fns(&program, &profile);
-        let main_fn = out.iter().find(|f| &*f.name.resolve() == "main").unwrap();
+        let main_fn = out.fns.iter().find(|f| &*f.name.resolve() == "main").unwrap();
         let double_sym = crate::interner::intern("double");
         match &main_fn.body[0] {
-            Stmt::Let { value, .. } => assert!(calls_name(value, double_sym)),
+            Stmt::Let { value, .. } => assert!(calls_name(&value, double_sym)),
             other => panic!("expected a let, got {other:?}"),
         }
     }
@@ -343,7 +343,7 @@ mod tests {
         let mut profile = HashMap::new();
         profile.insert("triple".to_string(), 50);
         let out = inline_hot_fns(&program, &profile);
-        let main_fn = out.iter().find(|f| &*f.name.resolve() == "main").unwrap();
+        let main_fn = out.fns.iter().find(|f| &*f.name.resolve() == "main").unwrap();
         let triple_sym = crate::interner::intern("triple");
         let z_sym = crate::interner::intern("z");
         // The direct call `triple(9)` must stay a real call — the
@@ -371,10 +371,10 @@ mod tests {
         let mut profile = HashMap::new();
         profile.insert("weird".to_string(), 50);
         let out = inline_hot_fns(&program, &profile);
-        let main_fn = out.iter().find(|f| &*f.name.resolve() == "main").unwrap();
+        let main_fn = out.fns.iter().find(|f| &*f.name.resolve() == "main").unwrap();
         let weird_sym = crate::interner::intern("weird");
         match &main_fn.body[0] {
-            Stmt::Let { value, .. } => assert!(calls_name(value, weird_sym)),
+            Stmt::Let { value, .. } => assert!(calls_name(&value, weird_sym)),
             other => panic!("expected a let, got {other:?}"),
         }
     }

@@ -102,4 +102,20 @@ pub struct Fn {
     pub span: Span,
 }
 
-pub type Program = Vec<Fn>;
+#[derive(Debug, Clone)]
+pub struct Program {
+    pub fns: Vec<Fn>,
+    pub structs: Vec<StructDecl>,
+}
+
+/// A struct declaration — `fields` mirrors `Fn::params`'s shape
+/// (`Vec<Param>`, so `{ name, ty }` pairs) since a field and a
+/// parameter are the same kind of "named, typed slot." `StructDecl`
+/// itself is not yet referenced by `Expr`/`Stmt` in this task — that's
+/// Task 2.
+#[derive(Debug, Clone)]
+pub struct StructDecl {
+    pub name: Symbol,
+    pub fields: Vec<Param>,
+    pub span: Span,
+}
