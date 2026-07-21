@@ -35,11 +35,16 @@ fn report_many(src: &str, path: &str, errors: &[KestrelcError]) {
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
+    if let [_, cmd, path] = args.as_slice() {
+        if cmd == "watch" {
+            return kestrelc::watch::run(path);
+        }
+    }
     let (wasm, path) = match args.as_slice() {
         [_, flag, path] if flag == "--wasm" => (true, path.clone()),
         [_, path] => (false, path.clone()),
         _ => {
-            eprintln!("usage: kestrelc [--wasm] <file.kes>");
+            eprintln!("usage: kestrelc [--wasm] <file.kes>\n       kestrelc watch <file.kes>");
             return ExitCode::FAILURE;
         }
     };

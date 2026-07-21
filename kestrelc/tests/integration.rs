@@ -2053,3 +2053,27 @@ fn a_wasm_codegen_error_also_now_carries_a_full_caret_diagnostic() {
         "expected a full file:line:col: + caret diagnostic on the wasm codegen error, got:\n{stderr}"
     );
 }
+
+#[test]
+fn watch_rejects_a_nonexistent_file_immediately_without_hanging() {
+    // This test only exercises the fast-fail path (Task 1 Step 4's
+    // `!src_path.exists()` check) -- it must never enter the actual
+    // watch loop, which would hang a test suite forever. Watch mode's
+    // interactive recompile-on-save behavior isn't practical to cover
+    // in an automated integration test (it never exits on its own by
+    // design), so this is the one thing about `watch` this suite can
+    // safely assert on.
+    let scratch = scratch_dir("watch_missing_file");
+    let missing_path = scratch.join("does_not_exist.kes");
+
+    let out = Command::new(kestrelc_bin())
+        .arg("watch")
+        .arg(&missing_path)
+        .current_dir(&scratch)
+        .output()
+        .expect("failed to run kestrelc");
+
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("No such file or directory"), "got: {stderr}");
+}
