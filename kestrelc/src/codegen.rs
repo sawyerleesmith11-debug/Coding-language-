@@ -459,8 +459,11 @@ impl Codegen {
 
     // Array-typed parameters occupy two i64 slots in the Cranelift
     // signature (pointer, then length) instead of one — see the Slot
-    // enum below for why arrays need two Variables at all.
-    fn fn_signature(program_fn: &Fn, call_conv: CallConv) -> Signature {
+    // enum below for why arrays need two Variables at all. A
+    // struct-typed parameter (scalar fields only, per this session's
+    // scoping — see kestrel-DESIGN.md) occupies one i64 slot per field,
+    // in declared field order, no pointer involved at all.
+    fn fn_signature(program_fn: &Fn, call_conv: CallConv, struct_table: &HashMap<Symbol, &StructDecl>) -> Signature {
         let mut sig = Signature::new(call_conv);
         for p in &program_fn.params {
             match &p.ty {
@@ -468,7 +471,14 @@ impl Codegen {
                     sig.params.push(AbiParam::new(types::I64)); // pointer
                     sig.params.push(AbiParam::new(types::I64)); // length
                 }
-                Type::Named(_) => sig.params.push(AbiParam::new(types::I64)),
+                Type::Named(name) => match struct_table.get(name) {
+                    Some(decl) => {
+                        for _ in &decl.fields {
+                            sig.params.push(AbiParam::new(types::I64));
+                        }
+                    }
+                    None => sig.params.push(AbiParam::new(types::I64)),
+                },
             }
         }
         sig.returns.push(AbiParam::new(types::I64));
@@ -514,7 +524,7 @@ impl Codegen {
                     }
                 }
             }
-            let sig = Self::fn_signature(f, self.call_conv);
+            let sig = Self::fn_signature(f, self.call_conv, &struct_table);
             let fn_name_text = f.name.resolve();
             let id = self
                 .module
@@ -562,7 +572,7 @@ impl Codegen {
 
     fn compile_fn(&mut self, f: &Fn, struct_table: &HashMap<Symbol, &StructDecl>) -> Result<(), KestrelcError> {
         let func_id = self.fn_ids[&f.name];
-        let sig = Self::fn_signature(f, self.call_conv);
+        let sig = Self::fn_signature(f, self.call_conv, struct_table);
 
         let mut ctx = Context::new();
         ctx.func = Function::with_name_signature(UserFuncName::user(0, func_id.as_u32()), sig);
@@ -1547,10 +1557,23 @@ impl<'a> FnCodegen<'a> {
                 let mut arg_vals = Vec::with_capacity(args.len());
                 for a in args {
                     // An array argument expands to two Cranelift values
-                    // (pointer, length), matching fn_signature's two
-                    // AbiParams per array-typed parameter.
+                    // (pointer, length); a struct argument expands to
+                    // one value per field, in declared field order —
+                    // both match fn_signature's own AbiParam expansion
+                    // for the corresponding parameter type.
+                    let struct_field_vars: Option<Vec<Variable>> = match &a.kind {
+                        ExprKind::Ident(n) => match self.vars.get(n) {
+                            Some(Slot::Struct { vars: field_vars, .. }) => Some(field_vars.clone()),
+                            _ => None,
+                        },
+                        _ => None,
+                    };
                     let is_array_ident = matches!(&a.kind, ExprKind::Ident(n) if matches!(self.vars.get(n), Some(Slot::Array { .. })));
-                    if is_array_ident {
+                    if let Some(field_vars) = struct_field_vars {
+                        for v in field_vars {
+                            arg_vals.push(self.builder.use_var(v));
+                        }
+                    } else if is_array_ident {
                         let (ptr, len) = self.resolve_array(a)?;
                         arg_vals.push(ptr);
                         arg_vals.push(len);

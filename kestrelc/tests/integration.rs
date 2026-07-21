@@ -1753,6 +1753,34 @@ fn a_struct_literal_can_reorder_fields_and_read_them_back_correctly() {
     assert_eq!(native_stdout(&run), "3 4\n");
 }
 
+#[test]
+fn a_struct_can_be_passed_as_a_function_parameter() {
+    let scratch = scratch_dir("struct_param");
+    let src_path = scratch.join("prog.kes");
+    fs::write(
+        &src_path,
+        "struct Point { x: i64, y: i64 }\n\
+         pure fn dist_sq(p: Point) -> i64 { return p.x * p.x + p.y * p.y; }\n\
+         fn main() {\n\
+         \x20   let p = Point { x: 3, y: 4 };\n\
+         \x20   print(dist_sq(p));\n\
+         }\n",
+    )
+    .unwrap();
+
+    let out = Command::new(kestrelc_bin())
+        .arg(&src_path)
+        .current_dir(&scratch)
+        .output()
+        .expect("failed to run kestrelc");
+    assert!(out.status.success(), "compile failed:\n{}", String::from_utf8_lossy(&out.stderr));
+
+    let bin = scratch.join("prog");
+    let run = Command::new(&bin).output().expect("failed to run compiled binary");
+    assert!(run.status.success(), "compiled binary exited with failure");
+    assert_eq!(native_stdout(&run), "25\n"); // 3*3 + 4*4 = 25
+}
+
 // ==================== per-expression spans ====================
 
 #[test]
