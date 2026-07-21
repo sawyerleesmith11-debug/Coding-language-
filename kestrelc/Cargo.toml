@@ -29,6 +29,7 @@ native = [
     "dep:cranelift-object",
     "dep:cranelift-native",
     "dep:target-lexicon",
+    "dep:notify",
 ]
 
 [dependencies]
@@ -39,3 +40,8 @@ cranelift-object = { version = "0.116", optional = true }
 cranelift-native = { version = "0.116", optional = true }
 target-lexicon = { version = "0.12", optional = true }
 wasm-encoder = "0.253.0"
+# `kestrelc watch` only -- file-system watching for the native-only watch
+# subcommand. Gated behind "native" like the Cranelift deps above, for
+# the same reason (kestrelc-web's wasm32 lib build has no use for it and
+# notify's OS-level watching wouldn't compile there anyway).
+notify = { version = "6", optional = true }
