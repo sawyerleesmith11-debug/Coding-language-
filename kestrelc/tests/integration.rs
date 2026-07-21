@@ -1696,6 +1696,63 @@ fn an_array_param_fn_with_one_agreed_length_actually_gets_memoized() {
     assert_eq!(native_stdout(&run), "100000012\n100000012\n100000012\n");
 }
 
+#[test]
+fn a_struct_local_can_be_constructed_and_its_fields_read() {
+    let scratch = scratch_dir("struct_local");
+    let src_path = scratch.join("prog.kes");
+    fs::write(
+        &src_path,
+        "struct Point { x: i64, y: i64 }\n\
+         fn main() {\n\
+         \x20   let p = Point { x: 3, y: 4 };\n\
+         \x20   print(p.x, p.y);\n\
+         }\n",
+    )
+    .unwrap();
+
+    let out = Command::new(kestrelc_bin())
+        .arg(&src_path)
+        .current_dir(&scratch)
+        .output()
+        .expect("failed to run kestrelc");
+    assert!(out.status.success(), "compile failed:\n{}", String::from_utf8_lossy(&out.stderr));
+
+    let bin = scratch.join("prog");
+    let run = Command::new(&bin).output().expect("failed to run compiled binary");
+    assert!(run.status.success(), "compiled binary exited with failure");
+    assert_eq!(native_stdout(&run), "3 4\n");
+}
+
+#[test]
+fn a_struct_literal_can_reorder_fields_and_read_them_back_correctly() {
+    // Fields written out of declaration order in the literal --
+    // proves gen_binding actually reorders into declaration order
+    // rather than assuming written order matches it.
+    let scratch = scratch_dir("struct_field_reorder");
+    let src_path = scratch.join("prog.kes");
+    fs::write(
+        &src_path,
+        "struct Point { x: i64, y: i64 }\n\
+         fn main() {\n\
+         \x20   let p = Point { y: 4, x: 3 };\n\
+         \x20   print(p.x, p.y);\n\
+         }\n",
+    )
+    .unwrap();
+
+    let out = Command::new(kestrelc_bin())
+        .arg(&src_path)
+        .current_dir(&scratch)
+        .output()
+        .expect("failed to run kestrelc");
+    assert!(out.status.success(), "compile failed:\n{}", String::from_utf8_lossy(&out.stderr));
+
+    let bin = scratch.join("prog");
+    let run = Command::new(&bin).output().expect("failed to run compiled binary");
+    assert!(run.status.success(), "compiled binary exited with failure");
+    assert_eq!(native_stdout(&run), "3 4\n");
+}
+
 // ==================== per-expression spans ====================
 
 #[test]

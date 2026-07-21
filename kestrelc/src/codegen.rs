@@ -478,6 +478,7 @@ impl Codegen {
     pub fn compile_program(&mut self, program: &Program) -> Result<(), KestrelcError> {
         let pmap_callbacks = crate::inline::collect_parallel_map_callbacks(program);
         let array_param_lens = infer_array_param_lengths(program);
+        let struct_table: HashMap<Symbol, &StructDecl> = program.structs.iter().map(|s| (s.name, s)).collect();
         let mut next_memo_slot: i32 = 0;
 
         // Pass 1: declare every function's signature so calls (including
@@ -554,12 +555,12 @@ impl Codegen {
 
         // Pass 2: generate bodies.
         for f in &program.fns {
-            self.compile_fn(f)?;
+            self.compile_fn(f, &struct_table)?;
         }
         Ok(())
     }
 
-    fn compile_fn(&mut self, f: &Fn) -> Result<(), KestrelcError> {
+    fn compile_fn(&mut self, f: &Fn, struct_table: &HashMap<Symbol, &StructDecl>) -> Result<(), KestrelcError> {
         let func_id = self.fn_ids[&f.name];
         let sig = Self::fn_signature(f, self.call_conv);
 
@@ -574,7 +575,7 @@ impl Codegen {
             builder.switch_to_block(entry);
             builder.seal_block(entry);
 
-            let slot_kinds = collect_slots(f);
+            let slot_kinds = collect_slots(f, struct_table);
             let mut vars: HashMap<Symbol, Slot> = HashMap::new();
             let mut next_var: u32 = 0;
             for (name, kind) in &slot_kinds {
@@ -593,6 +594,20 @@ impl Codegen {
                         builder.declare_var(len, types::I64);
                         vars.insert(name.clone(), Slot::Array { ptr, len, literal_len: *literal_len });
                     }
+                    SlotKind::Struct(struct_name) => {
+                        let field_count = struct_table
+                            .get(struct_name)
+                            .map(|decl| decl.fields.len())
+                            .unwrap_or(0);
+                        let mut field_vars = Vec::with_capacity(field_count);
+                        for _ in 0..field_count {
+                            let v = Variable::from_u32(next_var);
+                            next_var += 1;
+                            builder.declare_var(v, types::I64);
+                            field_vars.push(v);
+                        }
+                        vars.insert(name.clone(), Slot::Struct { name: *struct_name, vars: field_vars });
+                    }
                 }
             }
             let mut param_idx = 0usize;
@@ -609,6 +624,13 @@ impl Codegen {
                         builder.def_var(*ptr, ptr_val);
                         builder.def_var(*len, len_val);
                         param_idx += 2;
+                    }
+                    Slot::Struct { vars: field_vars, .. } => {
+                        for v in field_vars.clone() {
+                            let val = builder.block_params(entry)[param_idx];
+                            builder.def_var(v, val);
+                            param_idx += 1;
+                        }
                     }
                 }
             }
@@ -679,6 +701,21 @@ impl Codegen {
                             }
                             offset += len;
                         }
+                        // Struct-typed parameters aren't accounted for in
+                        // the memo eligibility pass's flattened_nargs
+                        // computation yet (that's Task 6's ABI-shape work),
+                        // so a struct param can't actually reach here today
+                        // — no test exercises it. Packs each field's
+                        // current value in declared order so this stays
+                        // exhaustive and behaves reasonably if that
+                        // changes.
+                        Slot::Struct { vars: field_vars, .. } => {
+                            for v in field_vars {
+                                let val = builder.use_var(*v);
+                                builder.ins().store(MemFlags::new(), val, args_ptr, (offset * 8) as i32);
+                                offset += 1;
+                            }
+                        }
                     }
                 }
                 let slot = *slot;
@@ -741,6 +778,7 @@ impl Codegen {
                 str_cache: &mut self.str_cache,
                 str_counter: &mut self.str_counter,
                 where_info: &self.where_info,
+                struct_table,
                 my_where: self.where_info.get(&f.name),
                 epilogue,
                 cur_span: f.span,
@@ -829,11 +867,19 @@ impl Codegen {
 enum SlotKind {
     Scalar,
     Array { literal_len: Option<usize> },
+    /// Scalar-fields-only struct — carries the struct's own name so
+    /// `collect_slots`'s caller (and gen_binding/gen_expr's Field arm)
+    /// can look up its declared field order via the struct table.
+    Struct(Symbol),
 }
 
 enum Slot {
     Scalar(Variable),
     Array { ptr: Variable, len: Variable, literal_len: Option<usize> },
+    /// One Variable per field, in the struct's *declared* field order
+    /// (not necessarily the order the literal that produced this local
+    /// wrote them in).
+    Struct { name: Symbol, vars: Vec<Variable> },
 }
 
 // `known_lens` is every literal-length array slot seen *so far* in this
@@ -855,14 +901,23 @@ fn slot_kind_for_let(value: &Expr, known_lens: &HashMap<Symbol, usize>) -> SlotK
             };
             SlotKind::Array { literal_len: len }
         }
+        // Only a direct struct literal is recognized here -- `let p2 =
+        // p1;` aliasing an existing struct-typed local falls through to
+        // SlotKind::Scalar (wrong, but matches this exact same
+        // documented limitation for arrays just above: only a literal
+        // expression is classified, not an alias).
+        ExprKind::StructLit { name, .. } => SlotKind::Struct(*name),
         _ => SlotKind::Scalar,
     }
 }
 
-fn slot_kind_for_param(ty: &Type) -> SlotKind {
+fn slot_kind_for_param(ty: &Type, struct_table: &HashMap<Symbol, &StructDecl>) -> SlotKind {
     match ty {
         Type::Array { .. } => SlotKind::Array { literal_len: None },
-        Type::Named(_) => SlotKind::Scalar,
+        Type::Named(name) => match struct_table.get(name) {
+            Some(_) => SlotKind::Struct(*name),
+            None => SlotKind::Scalar,
+        },
     }
 }
 
@@ -905,12 +960,12 @@ fn walk_slots(
     }
 }
 
-fn collect_slots(f: &Fn) -> Vec<(Symbol, SlotKind)> {
+fn collect_slots(f: &Fn, struct_table: &HashMap<Symbol, &StructDecl>) -> Vec<(Symbol, SlotKind)> {
     let mut slots: Vec<(Symbol, SlotKind)> = Vec::new();
     let mut seen: HashMap<Symbol, ()> = HashMap::new();
     let mut known_lens: HashMap<Symbol, usize> = HashMap::new();
     for p in &f.params {
-        add_slot(p.name, slot_kind_for_param(&p.ty), &mut slots, &mut seen);
+        add_slot(p.name, slot_kind_for_param(&p.ty, struct_table), &mut slots, &mut seen);
     }
     walk_slots(&f.body, &mut slots, &mut seen, &mut known_lens);
     slots
@@ -927,6 +982,7 @@ struct FnCodegen<'a> {
     str_cache: &'a mut HashMap<String, StrConst>,
     str_counter: &'a mut usize,
     where_info: &'a HashMap<Symbol, WhereInfo>,
+    struct_table: &'a HashMap<Symbol, &'a StructDecl>,
     /// This function's own `where` pair, if it has one recognized —
     /// lets its body trust the precondition (elide the check on
     /// `arr_param[idx_param]`) since every call site is required to
@@ -1064,8 +1120,26 @@ impl<'a> FnCodegen<'a> {
                 self.builder.def_var(len, len_val);
                 Ok(())
             }
-            (Slot::Array { .. }, _) => Err(self.err(format!(
-                "kestrelc: '{name}' is an array variable and can only be (re)bound to an array literal so far"
+            (Slot::Struct { name: slot_struct_name, vars: field_vars }, ExprKind::StructLit { name: lit_name, fields }) => {
+                debug_assert_eq!(slot_struct_name, lit_name, "collect_slots and this literal disagree on struct type — a resolve.rs bug, not a user error");
+                let field_vars = field_vars.clone();
+                let decl_fields: Vec<Symbol> = self
+                    .struct_table
+                    .get(lit_name)
+                    .map(|decl| decl.fields.iter().map(|f| f.name).collect())
+                    .unwrap_or_default();
+                for (field_name, target_var) in decl_fields.iter().zip(field_vars.iter()) {
+                    let (_, value_expr) = fields
+                        .iter()
+                        .find(|(n, _)| n == field_name)
+                        .expect("resolve.rs already proved every declared field is present in this literal");
+                    let v = self.gen_expr(value_expr)?;
+                    self.builder.def_var(*target_var, v);
+                }
+                Ok(())
+            }
+            (Slot::Array { .. } | Slot::Struct { .. }, _) => Err(self.err(format!(
+                "kestrelc: '{name}' can't be (re)bound to this kind of expression so far"
             ))),
         }
     }
@@ -1255,6 +1329,7 @@ impl<'a> FnCodegen<'a> {
         match self.vars.get(name) {
             Some(Slot::Array { ptr, len, .. }) => Ok((self.builder.use_var(*ptr), self.builder.use_var(*len))),
             Some(Slot::Scalar(_)) => Err(self.err(format!("'{name}' is not an array"))),
+            Some(Slot::Struct { .. }) => Err(self.err(format!("'{name}' is not an array"))),
             None => Err(self.err(format!("Unknown identifier '{name}'"))),
         }
     }
@@ -1286,6 +1361,9 @@ impl<'a> FnCodegen<'a> {
                 Some(Slot::Scalar(var)) => Ok(self.builder.use_var(*var)),
                 Some(Slot::Array { .. }) => Err(self.err(format!(
                     "'{name}' is an array — it can only be indexed (arr[i]) or passed to a function, not used as a value directly"
+                ))),
+                Some(Slot::Struct { .. }) => Err(self.err(format!(
+                    "'{name}' is a struct — access a field (p.field) or pass it to a function, not used as a value directly"
                 ))),
                 None => Err(self.err(format!("Unknown identifier '{name}'"))),
             },
@@ -1356,6 +1434,24 @@ impl<'a> FnCodegen<'a> {
                 let offset = self.builder.ins().imul_imm(idx, 8);
                 let addr = self.builder.ins().iadd(ptr, offset);
                 Ok(self.builder.ins().load(types::I64, MemFlags::new(), addr, 0))
+            }
+            ExprKind::Field { target, field } => {
+                let ExprKind::Ident(target_name) = &target.kind else {
+                    return Err(self.err(
+                        "kestrelc only supports field access on a plain struct variable so far".into(),
+                    ));
+                };
+                match self.vars.get(target_name) {
+                    Some(Slot::Struct { name: struct_name, vars: field_vars }) => {
+                        let field_idx = self
+                            .struct_table
+                            .get(struct_name)
+                            .and_then(|decl| decl.fields.iter().position(|f| f.name == *field))
+                            .expect("resolve.rs already proved this field exists on this struct");
+                        Ok(self.builder.use_var(field_vars[field_idx]))
+                    }
+                    _ => Err(self.err(format!("'{target_name}' is not a struct"))),
+                }
             }
             ExprKind::Unary { op, expr } => {
                 let v = self.gen_expr(expr)?;
@@ -1468,9 +1564,6 @@ impl<'a> FnCodegen<'a> {
             }
             ExprKind::StructLit { .. } => {
                 Err(self.err("struct literals are not yet supported in kestrelc".into()))
-            }
-            ExprKind::Field { .. } => {
-                Err(self.err("field access is not yet supported in kestrelc".into()))
             }
         }
     }
