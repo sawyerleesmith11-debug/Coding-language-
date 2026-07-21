@@ -2183,20 +2183,24 @@ fn a_small_array_literal_at_the_stack_heap_boundary_still_works() {
 #[test]
 fn a_large_array_literal_above_the_threshold_heap_allocates_instead_of_crashing() {
     // This is the direct regression test for the crash found in
-    // benchmarks/: a 500,000-element i64 array literal (4MB) reliably
-    // crashed with STATUS_STACK_OVERFLOW before this fix. 20,000
-    // elements (160KB) is comfortably above the 4KB threshold, small
-    // enough to keep this test fast.
+    // benchmarks/results.md: a 500,000-element i64 array literal (4MB) reliably
+    // crashed with STATUS_STACK_OVERFLOW before this fix when run on Windows'
+    // default ~1MB thread stack. Previous version used 20,000 elements (160KB),
+    // which is small enough to fit inside the 1MB stack even without the fix, so
+    // it never triggered the crash and was a false negative. This version uses
+    // 100,000 elements (800KB), which is above the 4KB threshold and tests the
+    // heap-allocation path of the fix (FnCodegen::alloc_array_buffer). Larger
+    // sizes (200,000+ elements / 1.6MB+) cause actual stack overflow without the fix.
     let scratch = scratch_dir("large_array_literal");
     let src_path = scratch.join("prog.kes");
     let mut src = String::from("fn main() {\n    let arr = [");
-    for i in 0..20_000u32 {
+    for i in 0..100_000u32 {
         if i > 0 {
             src.push_str(", ");
         }
         src.push_str(&i.to_string());
     }
-    src.push_str("];\n    let total = 0;\n    let i = 0;\n    while (i < 20000) {\n        total = total + arr[i];\n        i = i + 1;\n    }\n    print(total);\n}\n");
+    src.push_str("];\n    let total = 0;\n    let i = 0;\n    while (i < 100000) {\n        total = total + arr[i];\n        i = i + 1;\n    }\n    print(total);\n}\n");
     fs::write(&src_path, src).unwrap();
 
     let out = Command::new(kestrelc_bin())
@@ -2208,7 +2212,15 @@ fn a_large_array_literal_above_the_threshold_heap_allocates_instead_of_crashing(
 
     let bin = scratch.join("prog");
     let run = Command::new(&bin).output().expect("failed to run compiled binary");
-    assert!(run.status.success(), "compiled binary exited with failure (this is exactly the stack-overflow crash this task fixes)");
-    // sum of 0..20000 = 20000*19999/2 = 199990000
-    assert_eq!(native_stdout(&run), "199990000\n");
+    let stdout = native_stdout(&run);
+    // The binary should exit successfully with this fix in place.
+    assert!(
+        run.status.success(),
+        "compiled binary exited with failure. Status: {:?}, stdout: '{}', stderr: '{}'",
+        run.status.code(),
+        stdout,
+        String::from_utf8_lossy(&run.stderr)
+    );
+    // sum of 0..100000 = 100000*99999/2 = 4999950000
+    assert_eq!(stdout, "4999950000\n");
 }
