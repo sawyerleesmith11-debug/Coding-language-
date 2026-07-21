@@ -18,7 +18,10 @@ pub(crate) fn drain_debounced(rx: &Receiver<()>, timeout: Duration) -> bool {
     }
 }
 
+use crate::error::KestrelcError;
+use crate::{format_diagnostic, jit_codegen, lexer, parser, purity, resolve, typecheck};
 use notify::{Event, EventKind, RecursiveMode, Watcher};
+use std::fs;
 use std::path::Path;
 use std::process::{Command, ExitCode};
 use std::sync::mpsc::channel;
@@ -94,6 +97,26 @@ fn compile_and_run(exe: &Path, path: &str, stem: &str) {
     print!("\x1B[2J\x1B[1;1H"); // clear screen, move cursor to top-left
     println!("kestrelc watch: {path}");
 
+    match try_jit(path) {
+        JitOutcome::Ran(result) => {
+            println!("--- exited with code {result} (finished in {:.2?}, in-process) ---", started.elapsed());
+            return;
+        }
+        JitOutcome::CompileError => {
+            println!("--- failed in {:.2?} ---", started.elapsed());
+            return;
+        }
+        JitOutcome::Unsupported(reason) => {
+            // Not a failure -- this program uses a construct JIT mode
+            // doesn't support yet (arrays, structs, parallel_map -- see
+            // jit_codegen.rs's module doc comment). Fall through to the
+            // normal self-invoke/AOT path below, which handles
+            // everything. Printed so the user knows why this save felt
+            // like the old, slower path instead of silently varying.
+            println!("kestrelc watch: {reason} -- using the normal compile path for this run");
+        }
+    }
+
     let compile_status = Command::new(exe).arg(path).status();
     match compile_status {
         Ok(status) if status.success() => {}
@@ -116,6 +139,122 @@ fn compile_and_run(exe: &Path, path: &str, stem: &str) {
     match Command::new(&bin_path).status() {
         Ok(status) => println!("--- exited with {status} (finished in {:.2?}) ---", started.elapsed()),
         Err(e) => eprintln!("kestrelc: failed to run '{bin_path}': {e}"),
+    }
+}
+
+enum JitOutcome {
+    /// Compiled and ran successfully in-process; carries `main`'s
+    /// returned i64.
+    Ran(i64),
+    /// A real compile error (lex/parse/resolve/purity/typecheck, or a
+    /// JIT-codegen-internal failure) -- already printed to stderr by the
+    /// time this is returned. Not a reason to fall back to the AOT path,
+    /// since that path would hit the exact same front-end error.
+    CompileError,
+    /// This program uses a construct JIT mode doesn't support yet (see
+    /// jit_codegen::check_jit_supported) -- fall back to the AOT path,
+    /// not a real failure.
+    Unsupported(String),
+}
+
+/// Runs the full front end (lex/parse/resolve/purity/typecheck -- the
+/// same pipeline main.rs's own compile path uses, reused directly rather
+/// than duplicated) and, if the program is within JIT mode's supported
+/// subset, JIT-compiles and runs it immediately in-process. See
+/// jit_codegen.rs's module doc comment for exactly what's supported.
+fn try_jit(path: &str) -> JitOutcome {
+    let src = match fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("kestrelc: can't read '{path}': {e}");
+            return JitOutcome::CompileError;
+        }
+    };
+
+    let tokens = match lexer::lex(&src) {
+        Ok(t) => t,
+        Err(e) => {
+            report_error(&src, path, &e);
+            return JitOutcome::CompileError;
+        }
+    };
+    let program = match parser::parse(tokens) {
+        Ok(p) => p,
+        Err(e) => {
+            report_error(&src, path, &e);
+            return JitOutcome::CompileError;
+        }
+    };
+
+    let fns = resolve::build_fn_table(&program);
+    let structs = resolve::build_struct_table(&program);
+    let resolve_errors = resolve::resolve(&program, &fns, &structs);
+    if !resolve_errors.is_empty() {
+        report_errors(&src, path, &resolve_errors);
+        return JitOutcome::CompileError;
+    }
+    let purity_errors = purity::check_purity(&program, &fns);
+    if !purity_errors.is_empty() {
+        report_errors(&src, path, &purity_errors);
+        return JitOutcome::CompileError;
+    }
+    let pmap_errors = purity::check_parallel_map(&program, &fns);
+    if !pmap_errors.is_empty() {
+        report_errors(&src, path, &pmap_errors);
+        return JitOutcome::CompileError;
+    }
+    let type_errors = typecheck::check_types(&program, &fns);
+    if !type_errors.is_empty() {
+        report_errors(&src, path, &type_errors);
+        return JitOutcome::CompileError;
+    }
+    if !program.fns.iter().any(|f| &*f.name.resolve() == "main") {
+        eprintln!("kestrelc: No 'main' function found");
+        return JitOutcome::CompileError;
+    }
+
+    if let Err(e) = jit_codegen::check_jit_supported(&program) {
+        return JitOutcome::Unsupported(e.message);
+    }
+
+    let mut cg = match jit_codegen::JitCodegen::new() {
+        Ok(c) => c,
+        Err(e) => {
+            report_error(&src, path, &e);
+            return JitOutcome::CompileError;
+        }
+    };
+    if let Err(e) = cg.compile_program(&program) {
+        report_error(&src, path, &e);
+        return JitOutcome::CompileError;
+    }
+    match cg.finish_and_run() {
+        Ok(result) => JitOutcome::Ran(result),
+        Err(e) => {
+            report_error(&src, path, &e);
+            JitOutcome::CompileError
+        }
+    }
+}
+
+/// Matches main.rs's own report_one exactly (duplicated, not shared --
+/// main.rs is a separate bin crate, not something this lib module can
+/// call into).
+fn report_error(src: &str, path: &str, e: &KestrelcError) {
+    if e.span.line == 0 {
+        eprintln!("kestrelc: {}", e.message);
+    } else {
+        eprintln!("kestrelc: {}", format_diagnostic(src, path, e.span.line, e.span.col, e.span.len.max(1), &e.message));
+    }
+}
+
+/// Matches main.rs's own report_many exactly, same reason as report_error.
+fn report_errors(src: &str, path: &str, errors: &[KestrelcError]) {
+    if let Some(first) = errors.first() {
+        eprintln!("kestrelc: {}:", first.kind.label());
+    }
+    for e in errors {
+        report_error(src, path, e);
     }
 }
 

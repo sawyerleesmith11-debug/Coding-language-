@@ -27,6 +27,7 @@ native = [
     "dep:cranelift-frontend",
     "dep:cranelift-module",
     "dep:cranelift-object",
+    "dep:cranelift-jit",
     "dep:cranelift-native",
     "dep:target-lexicon",
     "dep:notify",
@@ -37,6 +38,10 @@ cranelift-codegen = { version = "0.116", optional = true }
 cranelift-frontend = { version = "0.116", optional = true }
 cranelift-module = { version = "0.116", optional = true }
 cranelift-object = { version = "0.116", optional = true }
+# `kestrelc watch`'s in-process execution path only -- see jit_codegen.rs.
+# Gated behind "native" like every other Cranelift dep, for the same
+# reason (irrelevant to kestrelc-web's wasm32 build).
+cranelift-jit = { version = "0.116", optional = true }
 cranelift-native = { version = "0.116", optional = true }
 target-lexicon = { version = "0.12", optional = true }
 wasm-encoder = "0.253.0"

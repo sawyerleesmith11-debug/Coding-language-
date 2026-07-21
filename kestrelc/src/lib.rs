@@ -18,6 +18,8 @@ pub mod codegen;
 #[cfg(feature = "native")]
 pub mod inline;
 #[cfg(feature = "native")]
+pub mod jit_codegen;
+#[cfg(feature = "native")]
 pub mod profile;
 #[cfg(feature = "native")]
 pub mod watch;
