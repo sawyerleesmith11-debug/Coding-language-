@@ -84,34 +84,44 @@ weigh in on scope tradeoffs, v1 is deliberately narrow — support what
 matters most for a fast edit-print-run loop, defer the rest as a
 documented, disclosed gap rather than block on harder integration work:
 
-- **Supported**: `print`/`print_str` (the dominant way a `kestrelc watch`
-  session actually observes output), `kestrelc_bounds_fail` (so a runtime
-  bounds-check failure still gives a clean message instead of an opaque
-  crash), ordinary function calls, arithmetic, control flow, arrays
-  (both stack- and heap-allocated per this session's `codegen.rs` fix —
-  `alloc_array_buffer`'s `malloc` call resolves the same way `printf`
-  does).
-- **Explicitly deferred, not supported in JIT mode (v1) — narrowed
-  further after a working spike confirmed the core mechanism, to keep
-  the actual port achievable in one continued session rather than
-  attempting full parity with `codegen.rs` in one pass**: `parallel_map`
-  (real pthread-based threading adds real complexity for an in-process
-  JIT host — a worker thread calling back into JIT'd code raises real
-  thread-safety questions about the JIT module's own internal state
-  that deserve their own design, not a rushed addition here),
-  memoization and profile-guided inlining (arguably low-value in a
-  rapid save-and-rerun loop anyway — a fresh JIT compile happens every
-  save regardless, so a profile file's cross-run persistence buys
-  little), and **structs** (a real, separate feature surface —
-  `Slot::Struct`, field access, struct-typed parameters — ported once
-  already this session from native to wasm; porting it a third time to
-  JIT is real, additional, separable work, not a natural byproduct of
-  the scalar/array port below). A `.kes` program using any of these
-  still compiles and runs correctly via the normal `kestrelc file.kes`
-  / `kestrelc watch` fallback — JIT mode should detect the unsupported
-  construct and report a clear, specific error (e.g. "structs aren't
-  supported under `kestrelc watch` yet") rather than attempting partial
-  support or crashing.
+- **Supported**: scalars (`let`/`=`), arithmetic and comparison operators,
+  `if`/`while`, ordinary function calls (including recursion — this is
+  just a normal Cranelift call, nothing JIT-specific needed), `print`/
+  `print_str` (the dominant way a `kestrelc watch` session actually
+  observes output).
+- **Explicitly deferred, not supported in JIT mode (v1) — narrowed twice
+  after a working spike confirmed the core mechanism, each time to keep
+  the actual port achievable and reviewable in one continued session
+  rather than attempting full parity with `codegen.rs` in one
+  unsupervised pass**:
+  - `parallel_map` — real pthread-based threading adds real complexity
+    for an in-process JIT host (a worker thread calling back into JIT'd
+    code raises real thread-safety questions about the JIT module's own
+    internal state that deserve their own design).
+  - Memoization and profile-guided inlining — arguably low-value in a
+    rapid save-and-rerun loop anyway (a fresh JIT compile happens every
+    save regardless, so cross-run profile persistence buys little).
+  - **Structs** — a real, separate feature surface (`Slot::Struct`,
+    field access, struct-typed parameters) already ported once this
+    session (native to wasm); porting it a third time is real,
+    separable follow-up work.
+  - **Arrays** (both literals and indexing) — real complexity of its
+    own (bounds-check codegen, the stack-vs-heap `alloc_array_buffer`
+    threshold from this session's other fix, `resolve_array`'s pointer/
+    length tracking). Deferring this alongside the above keeps v1 to a
+    genuinely small, self-contained subset (scalars, control flow,
+    calls, print) that's realistic to build correctly and get reviewed
+    without the user present, rather than a large port with more
+    surface area for an unsupervised mistake to hide in.
+
+  A `.kes` program using any deferred construct still compiles and runs
+  correctly via the normal `kestrelc file.kes` / non-JIT `kestrelc
+  watch` fallback — JIT mode must detect the unsupported construct and
+  report a clear, specific error (e.g. "arrays aren't supported under
+  `kestrelc watch` yet") rather than attempting partial support or
+  crashing, and `watch.rs` should fall back to the existing self-invoke
+  path automatically when JIT mode reports "unsupported," not surface
+  that as a hard failure to the user.
 
 This narrowing is a judgment call made without the user present — flagged
 clearly for their review, not presented as an unchangeable final scope.
@@ -159,12 +169,17 @@ clearly for their review, not presented as an unchangeable final scope.
   `jit_codegen`/`watch.rs` that skips the `notify` watcher, since the
   existing `tests/integration.rs` pattern already can't spawn/kill a
   real interactive watch session cleanly).
-- A test proving a runtime bounds-check failure still produces a clean
-  message under JIT execution.
 - A test proving `parallel_map` is rejected with a clear error message
   rather than crashing or silently misbehaving under JIT mode.
 - A test proving a program using a struct is rejected with a clear
   error message under JIT mode.
+- A test proving a program using an array is rejected with a clear
+  error message under JIT mode.
+- A test proving recursion (e.g. `fib`) works correctly under JIT
+  execution — this is the one "supported" feature with any real
+  subtlety (a self-call must resolve correctly within the same JIT
+  compile), worth its own explicit test rather than assuming it's
+  covered by the basic print/arithmetic tests.
 - Manual verification: time an actual `kestrelc watch` save-and-rerun
   cycle for a trivial program, compare against this session's measured
   ~30-100ms AOT-based watch cycle — the whole point of this design is a
