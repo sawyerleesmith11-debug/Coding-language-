@@ -49,10 +49,50 @@ use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{DataDescription, DataId, FuncId, Linkage, Module};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicI64, Ordering};
 
 extern "C" {
     fn printf(fmt: *const u8, arg: i64) -> i32;
     fn fflush(stream: *mut std::ffi::c_void) -> i32;
+}
+
+/// Every JIT-compiled function call increments this on entry and
+/// decrements it on every return path (see `kestrelc_jit_enter_frame`
+/// below) -- a plain call-depth counter, not a real stack-pointer check,
+/// but cheap and sufficient to catch runaway recursion before it faults.
+/// `AtomicI64` only because a `static mut` would need `unsafe` at every
+/// access; JIT-compiled code always runs on the single thread that called
+/// `finish_and_run`, so there's no real concurrency here.
+static JIT_CALL_DEPTH: AtomicI64 = AtomicI64::new(0);
+
+/// Deep enough for any legitimate recursive Kestrel program (the deepest
+/// real test in this suite recurses a few dozen levels), shallow enough
+/// to trip well before a Windows default 1MB thread stack is exhausted
+/// even for a function with several locals per frame.
+const JIT_MAX_CALL_DEPTH: i64 = 10_000;
+
+/// Registered as a JIT symbol and called at the start of every
+/// JIT-compiled function body (see `FnCodegen::gen_frame_enter_guard`).
+/// Returns non-zero once the call depth exceeds `JIT_MAX_CALL_DEPTH`, at
+/// which point the caller emits a clean abort instead of letting
+/// unbounded recursion fault the native stack -- a hardware stack
+/// overflow (unlike the div-by-zero trap `kestrelc_jit_abort` guards
+/// against) isn't a catchable Rust error at all, so this must be
+/// prevented proactively rather than caught after the fact.
+extern "C" fn kestrelc_jit_enter_frame() -> i32 {
+    let depth = JIT_CALL_DEPTH.fetch_add(1, Ordering::Relaxed) + 1;
+    if depth > JIT_MAX_CALL_DEPTH {
+        1
+    } else {
+        0
+    }
+}
+
+/// Registered as a JIT symbol and called on every return path out of a
+/// JIT-compiled function (see `FnCodegen::call_exit_frame`) -- balances
+/// `kestrelc_jit_enter_frame`'s increment.
+extern "C" fn kestrelc_jit_exit_frame() {
+    JIT_CALL_DEPTH.fetch_sub(1, Ordering::Relaxed);
 }
 
 /// Registered as a JIT symbol (see `JitCodegen::new`) and called directly
@@ -204,6 +244,8 @@ pub struct JitCodegen {
     fn_ids: HashMap<Symbol, FuncId>,
     printf_id: FuncId,
     abort_id: FuncId,
+    enter_frame_id: FuncId,
+    exit_frame_id: FuncId,
     call_conv: CallConv,
     str_cache: HashMap<String, StrConst>,
     str_counter: usize,
@@ -223,6 +265,8 @@ impl JitCodegen {
         let mut jit_builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
         jit_builder.symbol("printf", printf as *const u8);
         jit_builder.symbol("kestrelc_jit_abort", kestrelc_jit_abort as *const u8);
+        jit_builder.symbol("kestrelc_jit_enter_frame", kestrelc_jit_enter_frame as *const u8);
+        jit_builder.symbol("kestrelc_jit_exit_frame", kestrelc_jit_exit_frame as *const u8);
         let mut module = JITModule::new(jit_builder);
 
         let mut printf_sig = Signature::new(call_conv);
@@ -244,11 +288,28 @@ impl JitCodegen {
             .declare_function("kestrelc_jit_abort", Linkage::Import, &abort_sig)
             .map_err(|e| KestrelcError::internal(ErrorKind::Codegen, e.to_string()))?;
 
+        // No params, returns i32 (0 = ok, non-zero = depth limit hit) --
+        // called at the top of every JIT-compiled function body.
+        let mut enter_frame_sig = Signature::new(call_conv);
+        enter_frame_sig.returns.push(AbiParam::new(types::I32));
+        let enter_frame_id = module
+            .declare_function("kestrelc_jit_enter_frame", Linkage::Import, &enter_frame_sig)
+            .map_err(|e| KestrelcError::internal(ErrorKind::Codegen, e.to_string()))?;
+
+        // No params, no return -- called on every return path out of a
+        // JIT-compiled function, balancing enter_frame's increment.
+        let exit_frame_sig = Signature::new(call_conv);
+        let exit_frame_id = module
+            .declare_function("kestrelc_jit_exit_frame", Linkage::Import, &exit_frame_sig)
+            .map_err(|e| KestrelcError::internal(ErrorKind::Codegen, e.to_string()))?;
+
         Ok(JitCodegen {
             module,
             fn_ids: HashMap::new(),
             printf_id,
             abort_id,
+            enter_frame_id,
+            exit_frame_id,
             call_conv,
             str_cache: HashMap::new(),
             str_counter: 0,
@@ -336,13 +397,17 @@ impl JitCodegen {
                 fn_ids: &self.fn_ids,
                 printf_id: self.printf_id,
                 abort_id: self.abort_id,
+                enter_frame_id: self.enter_frame_id,
+                exit_frame_id: self.exit_frame_id,
                 module: &mut self.module,
                 str_cache: &mut self.str_cache,
                 str_counter: &mut self.str_counter,
                 cur_span: f.span,
             };
+            fc.gen_frame_enter_guard()?;
             let terminated = fc.gen_block(&f.body)?;
             if !terminated {
+                fc.call_exit_frame();
                 let zero = fc.builder.ins().iconst(types::I64, 0);
                 fc.builder.ins().return_(&[zero]);
             }
@@ -360,6 +425,13 @@ impl JitCodegen {
     /// returning its i64 result. Consumes `self` -- a `JitCodegen` is a
     /// one-shot, single-run object (see the struct's own doc comment).
     pub fn finish_and_run(mut self) -> Result<i64, KestrelcError> {
+        // Reset in case a stale count somehow survived from an earlier
+        // run in this same process (kestrelc watch is long-lived; a
+        // fresh JitCodegen is built per save, but JIT_CALL_DEPTH is a
+        // process-wide static). A normal completed run always balances
+        // its own enter/exit calls back to 0, so this is a safety net,
+        // not something a correct run relies on.
+        JIT_CALL_DEPTH.store(0, Ordering::Relaxed);
         self.module
             .finalize_definitions()
             .map_err(|e| KestrelcError::internal(ErrorKind::Codegen, e.to_string()))?;
@@ -426,6 +498,8 @@ struct FnCodegen<'a> {
     fn_ids: &'a HashMap<Symbol, FuncId>,
     printf_id: FuncId,
     abort_id: FuncId,
+    enter_frame_id: FuncId,
+    exit_frame_id: FuncId,
     module: &'a mut JITModule,
     str_cache: &'a mut HashMap<String, StrConst>,
     str_counter: &'a mut usize,
@@ -529,6 +603,7 @@ impl<'a> FnCodegen<'a> {
                     Some(e) => self.gen_expr(e)?,
                     None => self.builder.ins().iconst(types::I64, 0),
                 };
+                self.call_exit_frame();
                 self.builder.ins().return_(&[v]);
                 Ok(true)
             }
@@ -623,6 +698,41 @@ impl<'a> FnCodegen<'a> {
         self.builder.ins().call(local_abort, &[]);
         self.builder.ins().trap(TrapCode::unwrap_user(1));
         Ok(())
+    }
+
+    /// Calls `kestrelc_jit_enter_frame` and, if the call-depth limit is
+    /// already exceeded, aborts cleanly with a "stack overflow" message
+    /// instead of letting recursion continue toward a hardware stack
+    /// fault (see this file's module-level `JIT_CALL_DEPTH` doc comment).
+    /// Emitted once, at the very top of every JIT-compiled function body,
+    /// before any of its own code runs.
+    fn gen_frame_enter_guard(&mut self) -> CgResult<()> {
+        let local = self.module.declare_func_in_func(self.enter_frame_id, self.builder.func);
+        let call = self.builder.ins().call(local, &[]);
+        let over_limit = self.builder.inst_results(call)[0];
+        let zero = self.builder.ins().iconst(types::I32, 0);
+        let is_over = self.builder.ins().icmp(IntCC::NotEqual, over_limit, zero);
+
+        let abort_blk = self.builder.create_block();
+        let ok_blk = self.builder.create_block();
+        self.builder.ins().brif(is_over, abort_blk, &[], ok_blk, &[]);
+
+        self.builder.switch_to_block(abort_blk);
+        self.builder.seal_block(abort_blk);
+        self.gen_runtime_abort("kestrelc watch: runtime error: stack overflow (too much recursion)\n")?;
+
+        self.builder.switch_to_block(ok_blk);
+        self.builder.seal_block(ok_blk);
+        Ok(())
+    }
+
+    /// Calls `kestrelc_jit_exit_frame`, balancing the increment
+    /// `gen_frame_enter_guard` made on entry -- emitted on every return
+    /// path out of a function (see the `Stmt::Return` arm of `gen_stmt`
+    /// and `compile_fn`'s implicit fall-off-the-end return).
+    fn call_exit_frame(&mut self) {
+        let local = self.module.declare_func_in_func(self.exit_frame_id, self.builder.func);
+        self.builder.ins().call(local, &[]);
     }
 
     /// `l op r` for `BinOp::Div`/`BinOp::Mod`, guarded against the two

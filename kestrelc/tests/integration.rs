@@ -2167,6 +2167,36 @@ fn watch_division_by_zero_exits_cleanly_with_a_message_instead_of_crashing() {
 }
 
 #[test]
+fn watch_unbounded_recursion_exits_cleanly_with_a_message_instead_of_crashing() {
+    // Regression test for a real review finding: JIT-compiled code runs
+    // in-process on the same native thread as `kestrelc watch` itself, so
+    // unbounded recursion used to exhaust the OS thread stack -- a
+    // hardware fault, not a catchable Rust panic, unlike the div-by-zero
+    // trap covered by the sibling test above. `gen_frame_enter_guard` in
+    // jit_codegen.rs now counts call depth and aborts cleanly (via
+    // `kestrelc_jit_abort`, same exit code 101) once JIT_MAX_CALL_DEPTH is
+    // exceeded, well before the real native stack would fault.
+    let scratch = scratch_dir("watch_stack_overflow");
+    let src_path = scratch.join("prog.kes");
+    fs::write(
+        &src_path,
+        "fn recurse(n: i64) -> i64 {\n    return recurse(n + 1);\n}\nfn main() {\n    print(recurse(0));\n}\n",
+    )
+    .unwrap();
+
+    let out = Command::new(kestrelc_bin())
+        .arg("watch")
+        .arg(&src_path)
+        .current_dir(&scratch)
+        .output()
+        .expect("failed to run kestrelc watch");
+
+    assert_eq!(out.status.code(), Some(101), "expected the deliberate exit(101), got status {:?}", out.status);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("stack overflow"), "expected a clear runtime error message, got:\n{stdout}");
+}
+
+#[test]
 fn rejects_an_array_literal_too_large_to_safely_compile() {
     // Generates the literal mechanically -- 12,500,001 elements is
     // one past the 100MB (12,500,000 * 8 bytes) cap.
