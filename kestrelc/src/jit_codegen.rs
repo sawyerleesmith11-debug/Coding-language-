@@ -1063,6 +1063,67 @@ mod tests {
     }
 
     #[test]
+    fn mutual_recursion_between_two_different_functions_runs_correctly() {
+        // compile_program's two-pass declare-then-define structure exists
+        // specifically to let calls resolve regardless of source order,
+        // including forward references between different functions -- but
+        // until now every recursion test only exercised self-recursion
+        // (fib), never two functions calling each other. is_even/is_odd is
+        // the standard minimal mutual-recursion example.
+        let result = jit_run(
+            "fn is_even(n: i64) -> i64 {\n\
+             \x20   if (n == 0) {\n\
+             \x20       return 1;\n\
+             \x20   } else {\n\
+             \x20       return is_odd(n - 1);\n\
+             \x20   }\n\
+             }\n\
+             fn is_odd(n: i64) -> i64 {\n\
+             \x20   if (n == 0) {\n\
+             \x20       return 0;\n\
+             \x20   } else {\n\
+             \x20       return is_even(n - 1);\n\
+             \x20   }\n\
+             }\n\
+             fn main() {\n\
+             \x20   return is_even(10);\n\
+             }\n",
+        );
+        assert_eq!(result, 1);
+    }
+
+    #[test]
+    fn negative_operands_in_comparisons_and_unary_negation_produce_correct_results() {
+        // Regression coverage gap noted in review: every existing
+        // arithmetic/control-flow test used only non-negative literals, so
+        // a sign-handling bug in icmp's SignedLessThan/SignedGreaterThan
+        // codegen or in UnOp::Neg's ineg codegen would have gone
+        // undetected (division_and_modulo_still_produce_correct_results...
+        // above covers sdiv/srem with negative operands, but not
+        // comparisons or unary negation).
+        let result = jit_run(
+            "fn main() {\n\
+             \x20   let a = -5;\n\
+             \x20   let b = 3;\n\
+             \x20   let neg_b = -b;\n\
+             \x20   let total = 0;\n\
+             \x20   if (a < b) {\n\
+             \x20       total = total + 1;\n\
+             \x20   }\n\
+             \x20   if (neg_b > a) {\n\
+             \x20       total = total + 10;\n\
+             \x20   }\n\
+             \x20   if (a < neg_b) {\n\
+             \x20       total = total + 100;\n\
+             \x20   }\n\
+             \x20   return total;\n\
+             }\n",
+        );
+        // a=-5, b=3, neg_b=-3: a<b true(+1), neg_b>a true(+10), a<neg_b true(+100)
+        assert_eq!(result, 111);
+    }
+
+    #[test]
     fn a_program_using_arrays_is_rejected_with_a_clear_message() {
         let program = parse(lex("fn main() { let arr = [1, 2, 3]; print(arr[0]); }").unwrap()).unwrap();
         let err = check_jit_supported(&program).unwrap_err();
