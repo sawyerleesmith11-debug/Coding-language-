@@ -29,9 +29,10 @@ use std::path::PathBuf;
 const CACHE_FORMAT_VERSION: &str = "v2";
 
 /// Where cache entries live: `$KESTRELC_CACHE_DIR` if set, else
-/// `$XDG_CACHE_HOME/kestrelc`, else `$HOME/.cache/kestrelc`, else `None`
-/// (caching is silently skipped — a missing `$HOME` is rare but not
-/// fatal to compiling).
+/// `$XDG_CACHE_HOME/kestrelc`, else `$HOME/.cache/kestrelc`, else
+/// `$USERPROFILE/.cache/kestrelc` (Windows shells like PowerShell/cmd.exe
+/// don't set `$HOME`), else `None` (caching is silently skipped -- a
+/// missing home directory entirely is rare but not fatal to compiling).
 pub fn dir() -> Option<PathBuf> {
     if let Ok(d) = std::env::var("KESTRELC_CACHE_DIR") {
         return Some(PathBuf::from(d));
@@ -41,6 +42,18 @@ pub fn dir() -> Option<PathBuf> {
     }
     if let Ok(home) = std::env::var("HOME") {
         return Some(PathBuf::from(home).join(".cache").join("kestrelc"));
+    }
+    // Windows doesn't set $HOME by default in most shells (PowerShell,
+    // cmd.exe) -- only $USERPROFILE. Without this fallback, caching (and
+    // profile.rs's profile-guided inlining, which is keyed off this same
+    // directory) silently never engages for any Windows user not
+    // explicitly running from a Unix-like shell that happens to set
+    // $HOME (e.g. Git Bash) -- every compile looks like a fresh cold
+    // start every time, with no error or indication anything's wrong
+    // (this is always meant to be a silent optimization, never a hard
+    // failure).
+    if let Ok(profile) = std::env::var("USERPROFILE") {
+        return Some(PathBuf::from(profile).join(".cache").join("kestrelc"));
     }
     None
 }
