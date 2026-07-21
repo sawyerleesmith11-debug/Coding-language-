@@ -52,10 +52,20 @@ pub fn run(path: &str) -> ExitCode {
 
     let (tx, rx) = channel::<()>();
     let mut watcher = match notify::recommended_watcher(move |res: notify::Result<Event>| {
-        if let Ok(event) = res {
-            if matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_)) {
-                let _ = tx.send(());
+        match res {
+            Ok(event) => {
+                if matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_)) {
+                    let _ = tx.send(());
+                }
             }
+            // A dev-loop tool's whole point is fast feedback -- a
+            // watcher that silently goes deaf (OS-level watch failure,
+            // e.g. the watched file gets deleted rather than
+            // edited-and-rewritten) is worse than a crash, since the
+            // process looks alive with no indication it stopped doing
+            // anything. Surface it and keep going; the next real event
+            // (if the watch recovers) still works.
+            Err(e) => eprintln!("kestrelc: watch error: {e}"),
         }
     }) {
         Ok(w) => w,

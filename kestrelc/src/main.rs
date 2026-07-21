@@ -40,6 +40,12 @@ fn main() -> ExitCode {
             return kestrelc::watch::run(path);
         }
     }
+    if let [_, cmd] = args.as_slice() {
+        if cmd == "watch" {
+            eprintln!("usage: kestrelc watch <file.kes>");
+            return ExitCode::FAILURE;
+        }
+    }
     let (wasm, path) = match args.as_slice() {
         [_, flag, path] if flag == "--wasm" => (true, path.clone()),
         [_, path] => (false, path.clone()),
