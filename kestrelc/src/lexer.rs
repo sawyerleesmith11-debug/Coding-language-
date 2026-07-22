@@ -17,6 +17,9 @@ pub enum Tok {
     If,
     Else,
     While,
+    For,
+    From,
+    To,
     Where,
     Print,
     Return,
@@ -119,6 +122,9 @@ pub fn lex(src: &str) -> Result<Vec<Token>, KestrelcError> {
                 "if" => Tok::If,
                 "else" => Tok::Else,
                 "while" => Tok::While,
+                "for" => Tok::For,
+                "from" => Tok::From,
+                "to" => Tok::To,
                 "where" => Tok::Where,
                 "print" => Tok::Print,
                 "return" => Tok::Return,
@@ -251,5 +257,17 @@ mod tests {
         let tokens = lex("struct Point { x: i64 }").unwrap();
         assert_eq!(tokens[0].tok, Tok::Struct);
         assert!(matches!(tokens[1].tok, Tok::Ident(_)));
+    }
+
+    #[test]
+    fn lexes_for_from_to_as_keywords_not_identifiers() {
+        let tokens = lex("for i from 0 to n {}").unwrap();
+        let kinds: Vec<&Tok> = tokens.iter().map(|t| &t.tok).collect();
+        assert!(matches!(kinds[0], Tok::For));
+        assert!(matches!(kinds[1], Tok::Ident(_)));
+        assert!(matches!(kinds[2], Tok::From));
+        assert!(matches!(kinds[3], Tok::Number(0)));
+        assert!(matches!(kinds[4], Tok::To));
+        assert!(matches!(kinds[5], Tok::Ident(_)));
     }
 }

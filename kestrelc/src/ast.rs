@@ -95,6 +95,7 @@ pub enum Stmt {
     Assign { name: Symbol, value: Expr, span: Span },
     If { cond: Expr, then_block: Vec<Stmt>, else_block: Option<Vec<Stmt>>, span: Span },
     While { cond: Expr, body: Vec<Stmt>, span: Span },
+    RangeFor { var: Symbol, start: Expr, end: Expr, body: Vec<Stmt>, span: Span },
     Print { args: Vec<Expr>, span: Span },
     Return { value: Option<Expr>, span: Span },
     ExprStmt { expr: Expr, span: Span },
