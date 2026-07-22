@@ -283,6 +283,7 @@ pub struct Codegen {
     pmap_id: FuncId,
     bounds_fail_id: FuncId,
     malloc_id: FuncId,
+    alloc_fail_id: FuncId,
     profile: Option<ProfileState>,
     memo: MemoState,
     str_cache: HashMap<String, StrConst>,
@@ -362,6 +363,18 @@ impl Codegen {
         malloc_sig.returns.push(AbiParam::new(types::I64)); // ptr
         let malloc_id = module
             .declare_function("malloc", Linkage::Import, &malloc_sig)
+            .map_err(|e| KestrelcError::internal(ErrorKind::Codegen, e.to_string()))?;
+
+        // kestrelc_alloc_fail(elem_count: i64) -> ! — prints a friendly
+        // message and exits when `malloc` above returns NULL, instead of
+        // using the null pointer directly as the array's base address
+        // (every element store would then write through address 0, an
+        // access violation with no message). Same never-returns/trap
+        // pattern as kestrelc_bounds_fail above.
+        let mut alloc_fail_sig = Signature::new(call_conv);
+        alloc_fail_sig.params.push(AbiParam::new(types::I64)); // elem_count
+        let alloc_fail_id = module
+            .declare_function("kestrelc_alloc_fail", Linkage::Import, &alloc_fail_sig)
             .map_err(|e| KestrelcError::internal(ErrorKind::Codegen, e.to_string()))?;
 
         // kestrelc_parallel_map_i64(in: i64 ptr, len: i64, f: i64 fn ptr,
@@ -464,6 +477,7 @@ impl Codegen {
             pmap_id,
             bounds_fail_id,
             malloc_id,
+            alloc_fail_id,
             profile,
             memo: MemoState { lookup_id: memo_lookup_id, store_id: memo_store_id, slots: HashMap::new() },
             str_cache: HashMap::new(),
@@ -813,6 +827,7 @@ impl Codegen {
                 pmap_id: self.pmap_id,
                 bounds_fail_id: self.bounds_fail_id,
                 malloc_id: self.malloc_id,
+                alloc_fail_id: self.alloc_fail_id,
                 module: &mut self.module,
                 str_cache: &mut self.str_cache,
                 str_counter: &mut self.str_counter,
@@ -1018,6 +1033,7 @@ struct FnCodegen<'a> {
     pmap_id: FuncId,
     bounds_fail_id: FuncId,
     malloc_id: FuncId,
+    alloc_fail_id: FuncId,
     module: &'a mut ObjectModule,
     str_cache: &'a mut HashMap<String, StrConst>,
     str_counter: &'a mut usize,
@@ -1100,7 +1116,31 @@ impl<'a> FnCodegen<'a> {
             let local_malloc = self.module.declare_func_in_func(self.malloc_id, self.builder.func);
             let size_val = self.builder.ins().iconst(types::I64, size_bytes as i64);
             let call = self.builder.ins().call(local_malloc, &[size_val]);
-            self.builder.inst_results(call)[0]
+            let ptr = self.builder.inst_results(call)[0];
+
+            // malloc returns NULL on allocation failure -- previously
+            // unchecked, meaning every subsequent element store below
+            // would write through address 0 (an access violation with no
+            // indication of what went wrong) instead of a clear message.
+            // Same "check, print, exit cleanly" treatment as the
+            // out-of-bounds check further down in this file.
+            let zero = self.builder.ins().iconst(types::I64, 0);
+            let is_null = self.builder.ins().icmp(IntCC::Equal, ptr, zero);
+
+            let fail_blk = self.builder.create_block();
+            let ok_blk = self.builder.create_block();
+            self.builder.ins().brif(is_null, fail_blk, &[], ok_blk, &[]);
+
+            self.builder.switch_to_block(fail_blk);
+            self.builder.seal_block(fail_blk);
+            let local_alloc_fail = self.module.declare_func_in_func(self.alloc_fail_id, self.builder.func);
+            let count_val = self.builder.ins().iconst(types::I64, elem_count as i64);
+            self.builder.ins().call(local_alloc_fail, &[count_val]);
+            self.builder.ins().trap(TrapCode::unwrap_user(1));
+
+            self.builder.switch_to_block(ok_blk);
+            self.builder.seal_block(ok_blk);
+            ptr
         }
     }
 

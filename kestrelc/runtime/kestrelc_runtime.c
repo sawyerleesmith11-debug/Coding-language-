@@ -133,6 +133,19 @@ void kestrelc_bounds_fail(long long idx, long long len) {
     exit(1);
 }
 
+// Called by kestrelc-generated code when `malloc` for a heap-allocated
+// array literal (codegen.rs's alloc_array_buffer, for literals over the
+// 4KB stack threshold) returns NULL. Previously the null pointer was
+// used directly as the array's base address with no check at all --
+// every subsequent element store wrote through address 0, an access
+// violation with no message. Same "print a clear message, exit cleanly"
+// treatment as kestrelc_bounds_fail, for the same reason: an opaque
+// OS-level crash tells the user nothing.
+void kestrelc_alloc_fail(long long elem_count) {
+    fprintf(stderr, "kestrelc: out of memory allocating an array of %lld elements\n", elem_count);
+    exit(1);
+}
+
 // Small in-memory table of a *previous* run's recorded counts, loaded
 // once (on the first kestrelc_profile_record call of this process) so
 // every subsequent call in the same flush sequence can look up "what did
