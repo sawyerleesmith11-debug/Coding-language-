@@ -119,6 +119,14 @@ pub fn check_purity(program: &Program, fns: &HashMap<Symbol, &Fn>) -> Vec<Kestre
                         visit_stmt(st, fns, cache, stack, locals, impure);
                     }
                 }
+                Stmt::RangeFor { start, end, body, var, .. } => {
+                    visit_expr(start, fns, cache, stack, impure);
+                    visit_expr(end, fns, cache, stack, impure);
+                    locals.insert(*var);
+                    for st in body {
+                        visit_stmt(st, fns, cache, stack, locals, impure);
+                    }
+                }
                 Stmt::Print { .. } => {
                     *impure = true; // I/O
                 }
@@ -259,6 +267,13 @@ pub fn check_parallel_map(program: &Program, fns: &HashMap<Symbol, &Fn>) -> Vec<
                     visit_stmt(st, fns, errors);
                 }
             }
+            Stmt::RangeFor { start, end, body, span, .. } => {
+                visit_expr(start, fns, *span, errors);
+                visit_expr(end, fns, *span, errors);
+                for st in body {
+                    visit_stmt(st, fns, errors);
+                }
+            }
             Stmt::Print { args, span } => {
                 for a in args {
                     visit_expr(a, fns, *span, errors);
@@ -294,5 +309,23 @@ mod tests {
         ).unwrap()).unwrap();
         let fns = crate::resolve::build_fn_table(&program);
         assert!(check_purity(&program, &fns).is_empty());
+    }
+
+    #[test]
+    fn a_pure_fn_containing_only_a_range_for_loop_is_still_pure() {
+        let program = parse(lex(
+            "pure fn sum_to(n: i64) -> i64 { let total = 0; for i from 0 to n { total = total + i; } return total; }",
+        ).unwrap()).unwrap();
+        let fns = crate::resolve::build_fn_table(&program);
+        assert!(check_purity(&program, &fns).is_empty());
+    }
+
+    #[test]
+    fn a_range_for_loop_containing_print_makes_its_enclosing_fn_impure() {
+        let program = parse(lex(
+            "pure fn bad(n: i64) -> i64 { for i from 0 to n { print(i); } return 0; }",
+        ).unwrap()).unwrap();
+        let fns = crate::resolve::build_fn_table(&program);
+        assert!(!check_purity(&program, &fns).is_empty(), "expected a purity error for print() inside a pure fn's range-for body");
     }
 }

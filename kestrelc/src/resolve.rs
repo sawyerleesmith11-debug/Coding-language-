@@ -104,6 +104,11 @@ fn walk_stmts_for_size_warnings(stmts: &[Stmt], warnings: &mut Vec<KestrelcWarni
                 walk_expr_for_size_warnings(cond, warnings);
                 walk_stmts_for_size_warnings(body, warnings);
             }
+            Stmt::RangeFor { start, end, body, .. } => {
+                walk_expr_for_size_warnings(start, warnings);
+                walk_expr_for_size_warnings(end, warnings);
+                walk_stmts_for_size_warnings(body, warnings);
+            }
             Stmt::Print { args, .. } => {
                 for a in args {
                     walk_expr_for_size_warnings(a, warnings);
@@ -472,6 +477,14 @@ fn resolve_stmt(
                 resolve_stmt(st, locals, struct_locals, fns, structs, errors);
             }
         }
+        Stmt::RangeFor { var, start, end, body, span } => {
+            resolve_expr(start, locals, struct_locals, fns, structs, *span, errors);
+            resolve_expr(end, locals, struct_locals, fns, structs, *span, errors);
+            locals.insert(*var);
+            for st in body {
+                resolve_stmt(st, locals, struct_locals, fns, structs, errors);
+            }
+        }
         Stmt::Print { args, span } => {
             for a in args {
                 resolve_expr(a, locals, struct_locals, fns, structs, *span, errors);
@@ -497,6 +510,30 @@ mod tests {
         let fns = build_fn_table(&program);
         let structs = build_struct_table(&program);
         resolve(&program, &fns, &structs)
+    }
+
+    #[test]
+    fn a_range_for_loop_variable_is_visible_inside_its_body() {
+        let errors = resolve_src(
+            "fn main() { for i from 0 to 5 { print(i); } }"
+        );
+        assert!(errors.is_empty(), "expected no resolve errors, got: {:?}", errors);
+    }
+
+    #[test]
+    fn a_range_for_loop_variable_used_after_the_loop_still_resolves() {
+        // This codebase has no real block scoping (locals is one flat
+        // HashSet for the whole function, confirmed by reading
+        // resolve_stmt) -- a range-for's `var` behaves exactly like a
+        // `let` in that same flat sense: visible afterward too, matching
+        // how a `while` loop's own internal `let` would behave. This test
+        // documents that existing behavior extends correctly to
+        // RangeFor's `var`, not that it's a *desirable* semantic on its
+        // own.
+        let errors = resolve_src(
+            "fn main() { for i from 0 to 5 { } print(i); }"
+        );
+        assert!(errors.is_empty(), "expected no resolve errors, got: {:?}", errors);
     }
 
     #[test]

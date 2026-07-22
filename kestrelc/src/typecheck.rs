@@ -255,6 +255,28 @@ pub fn check_types(program: &Program, fns: &HashMap<Symbol, &Fn>) -> Vec<Kestrel
                     visit_stmt(st, locals, fns, errors);
                 }
             }
+            Stmt::RangeFor { var, start, end, body, .. } => {
+                let sk = infer_expr(start, locals, fns, errors);
+                if sk != Kind::Unknown && sk != Kind::Int {
+                    errors.push(KestrelcError::new(
+                        ErrorKind::Type,
+                        format!("for-loop start must be an integer expression, found {}", sk.name()),
+                        start.span,
+                    ));
+                }
+                let ek = infer_expr(end, locals, fns, errors);
+                if ek != Kind::Unknown && ek != Kind::Int {
+                    errors.push(KestrelcError::new(
+                        ErrorKind::Type,
+                        format!("for-loop end must be an integer expression, found {}", ek.name()),
+                        end.span,
+                    ));
+                }
+                locals.entry(*var).or_insert(Kind::Int);
+                for st in body {
+                    visit_stmt(st, locals, fns, errors);
+                }
+            }
             Stmt::Print { args, .. } => {
                 for a in args {
                     infer_expr(a, locals, fns, errors);
@@ -308,5 +330,21 @@ mod tests {
         let errors = check_types(&program, &fns);
         assert_eq!(errors.len(), 1);
         assert!(errors[0].message.contains("field access needs a struct"));
+    }
+
+    #[test]
+    fn a_range_for_loop_with_integer_bounds_type_checks() {
+        let program = parse(lex("fn main() { for i from 0 to 5 { print(i); } }").unwrap()).unwrap();
+        let fns = crate::resolve::build_fn_table(&program);
+        let errors = check_types(&program, &fns);
+        assert!(errors.is_empty(), "expected no type errors, got: {:?}", errors);
+    }
+
+    #[test]
+    fn a_range_for_loop_with_a_bool_bound_is_a_type_error() {
+        let program = parse(lex("fn main() { for i from true to 5 { print(i); } }").unwrap()).unwrap();
+        let fns = crate::resolve::build_fn_table(&program);
+        let errors = check_types(&program, &fns);
+        assert!(!errors.is_empty(), "expected a type error for a bool start bound");
     }
 }
