@@ -2459,3 +2459,101 @@ fn general_for_counts_down_by_two() {
     let run = Command::new(&bin).output().expect("failed to run compiled binary");
     assert_eq!(native_stdout(&run), "10\n8\n6\n4\n2\n");
 }
+
+#[test]
+fn general_for_supports_a_data_dependent_early_style_condition() {
+    // General-for's condition can be arbitrary -- not just a bound check
+    // against a fixed end value. This is the shape range-for can never
+    // express (see the design spec's "why two forms" reasoning).
+    let scratch = scratch_dir("general_for_data_dependent");
+    let src_path = scratch.join("prog.kes");
+    fs::write(
+        &src_path,
+        "fn main() {\n\
+         \x20   let arr = [3, 5, 0, 9, 1];\n\
+         \x20   let total = 0;\n\
+         \x20   for i = 0, arr[i] != 0, i = i + 1 {\n\
+         \x20       total = total + arr[i];\n\
+         \x20   }\n\
+         \x20   print(total);\n\
+         }\n",
+    )
+    .unwrap();
+
+    let out = Command::new(kestrelc_bin())
+        .arg(&src_path)
+        .current_dir(&scratch)
+        .output()
+        .expect("failed to run kestrelc");
+    assert!(out.status.success(), "compile failed:\n{}", String::from_utf8_lossy(&out.stderr));
+
+    let bin = scratch.join("prog");
+    let run = Command::new(&bin).output().expect("failed to run compiled binary");
+    assert_eq!(native_stdout(&run), "8\n"); // 3 + 5, stops before the 0
+}
+
+#[test]
+fn range_for_end_bound_is_evaluated_once_not_every_iteration() {
+    // If `end` were re-evaluated every iteration, this loop would run
+    // forever (or until some other limit) since `n` keeps growing inside
+    // the body -- capping it here proves the compiler actually evaluated
+    // `n`'s value once, at loop entry, matching this feature's documented
+    // "start/end evaluated exactly once" contract.
+    let scratch = scratch_dir("range_for_end_evaluated_once");
+    let src_path = scratch.join("prog.kes");
+    fs::write(
+        &src_path,
+        "fn main() {\n\
+         \x20   let n = 3;\n\
+         \x20   let count = 0;\n\
+         \x20   for i from 0 to n {\n\
+         \x20       n = n + 100;\n\
+         \x20       count = count + 1;\n\
+         \x20   }\n\
+         \x20   print(count);\n\
+         }\n",
+    )
+    .unwrap();
+
+    let out = Command::new(kestrelc_bin())
+        .arg(&src_path)
+        .current_dir(&scratch)
+        .output()
+        .expect("failed to run kestrelc");
+    assert!(out.status.success(), "compile failed:\n{}", String::from_utf8_lossy(&out.stderr));
+
+    let bin = scratch.join("prog");
+    let run = Command::new(&bin).output().expect("failed to run compiled binary");
+    assert_eq!(native_stdout(&run), "3\n");
+}
+
+#[test]
+fn range_for_bounds_can_be_arbitrary_expressions() {
+    let scratch = scratch_dir("range_for_expr_bounds");
+    let src_path = scratch.join("prog.kes");
+    fs::write(
+        &src_path,
+        "fn main() {\n\
+         \x20   let a = 2;\n\
+         \x20   let b = 7;\n\
+         \x20   let total = 0;\n\
+         \x20   for i from a + 1 to b - 1 {\n\
+         \x20       total = total + i;\n\
+         \x20   }\n\
+         \x20   print(total);\n\
+         }\n",
+    )
+    .unwrap();
+
+    let out = Command::new(kestrelc_bin())
+        .arg(&src_path)
+        .current_dir(&scratch)
+        .output()
+        .expect("failed to run kestrelc");
+    assert!(out.status.success(), "compile failed:\n{}", String::from_utf8_lossy(&out.stderr));
+
+    let bin = scratch.join("prog");
+    let run = Command::new(&bin).output().expect("failed to run compiled binary");
+    // for i from 3 to 6: 3+4+5 = 12
+    assert_eq!(native_stdout(&run), "12\n");
+}
