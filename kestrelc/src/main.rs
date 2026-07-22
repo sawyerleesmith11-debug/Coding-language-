@@ -1,5 +1,5 @@
 use kestrelc::error::{KestrelcError, KestrelcWarning};
-use kestrelc::{cache, codegen, cse, format_diagnostic, fusion, inline, lexer, parser, profile, purity, resolve, typecheck, wasm_codegen};
+use kestrelc::{cache, codegen, cse, format_diagnostic, fusion, inline, lexer, parser, profile, purity, resolve, typecheck};
 
 use std::fs;
 use std::path::Path;
@@ -61,11 +61,10 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     }
-    let (wasm, path) = match args.as_slice() {
-        [_, flag, path] if flag == "--wasm" => (true, path.clone()),
-        [_, path] => (false, path.clone()),
+    let path = match args.as_slice() {
+        [_, path] => path.clone(),
         _ => {
-            eprintln!("usage: kestrelc [--wasm] <file.kes>\n       kestrelc watch <file.kes>");
+            eprintln!("usage: kestrelc <file.kes>\n       kestrelc watch <file.kes>");
             return ExitCode::FAILURE;
         }
     };
@@ -94,22 +93,11 @@ fn main() -> ExitCode {
     // forever, and the whole feedback loop would never actually fire.
     // `source_key` (profile-file naming) stays stable across that churn
     // on purpose; only the artifact key changes.
-    let wasm_cache_key = cache::key(&src, "wasm");
     let source_key = cache::key(&src, "native");
     let profile_map = profile::read(&source_key);
     let profile_fingerprint = profile::fingerprint(&profile_map);
     let native_artifact_key = cache::artifact_key(&src, "native", &profile_fingerprint);
-    if wasm {
-        if let Some(cached) = cache::read(&wasm_cache_key, "wasm") {
-            let out_path = format!("{stem}.wasm");
-            if let Err(e) = fs::write(&out_path, &cached) {
-                eprintln!("kestrelc: failed to write '{out_path}': {e}");
-                return ExitCode::FAILURE;
-            }
-            println!("kestrelc: wrote ./{out_path} (cached)");
-            return ExitCode::SUCCESS;
-        }
-    } else if let Some(cached_bin) = cache::read(&native_artifact_key, "bin") {
+    if let Some(cached_bin) = cache::read(&native_artifact_key, "bin") {
         // The fast path: not just the object file but the *linked*
         // binary is cached, so this skips `cc` entirely -- on this
         // system that's ~1s of fixed linker-invocation overhead that
@@ -173,24 +161,6 @@ fn main() -> ExitCode {
 
     let program = fusion::fuse_loops(&program);
     let program = cse::eliminate_common_calls(&program);
-
-    if wasm {
-        let bytes = match wasm_codegen::compile_to_wasm(&program) {
-            Ok(b) => b,
-            Err(e) => {
-                report_one(&src, &path, &e);
-                return ExitCode::FAILURE;
-            }
-        };
-        let out_path = format!("{stem}.wasm");
-        if let Err(e) = fs::write(&out_path, &bytes) {
-            eprintln!("kestrelc: failed to write '{out_path}': {e}");
-            return ExitCode::FAILURE;
-        }
-        cache::write(&wasm_cache_key, "wasm", &bytes);
-        println!("kestrelc: wrote ./{out_path}");
-        return ExitCode::SUCCESS;
-    }
 
     // Rewrites call sites of small, pure, previously-hot functions (per
     // `profile_map`, from the last time this exact source actually ran)

@@ -9,8 +9,8 @@
 //
 // A single `thread_local!` table backs every `Symbol`, rather than
 // threading an `&mut Interner` parameter through the lexer, parser, and
-// every one of purity.rs/typecheck.rs/codegen.rs/wasm_codegen.rs/
-// fusion.rs/inline.rs's public functions (and everything they call) —
+// every one of purity.rs/typecheck.rs/codegen.rs/fusion.rs/inline.rs's
+// public functions (and everything they call) —
 // `kestrelc` compiles one file per process, single-threaded, so there's
 // only ever one interner "session" alive at a time; a `parallel_map`
 // program's worker threads run compiled machine code, never touch the

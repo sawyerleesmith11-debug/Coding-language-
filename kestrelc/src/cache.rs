@@ -9,9 +9,7 @@
 // editor's native engine) repeatedly on the same file during a dev
 // loop — see cache::dir()'s doc comment for exactly where entries live.
 //
-// Only used by the native CLI (filesystem-backed); kestrelc-web has no
-// filesystem, so the browser editor uses its own in-memory cache instead
-// (see kestrel-editor.html's runNative()).
+// Only used by the native CLI (filesystem-backed).
 
 use std::fs;
 use std::path::PathBuf;
@@ -73,9 +71,9 @@ pub(crate) fn fnv1a64(bytes: &[u8]) -> u64 {
     hash
 }
 
-/// The cache key for a given source text + compilation mode ("native" or
-/// "wasm" — the two backends produce different artifacts from the same
-/// source, so they need distinct entries).
+/// The cache key for a given source text + compilation mode. `mode` is
+/// always "native" today; kept as a parameter so a future second backend
+/// (or artifact shape) could still get its own distinct entries.
 pub fn key(src: &str, mode: &str) -> String {
     let mut input = String::with_capacity(src.len() + 16);
     input.push_str(CACHE_FORMAT_VERSION);

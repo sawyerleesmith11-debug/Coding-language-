@@ -1,10 +1,11 @@
 // Name resolution: one pass, run once, right after parsing and before
-// every checker — purity.rs, typecheck.rs, codegen.rs, and
-// wasm_codegen.rs each used to build their own `HashMap<Symbol, &Fn>`
-// from the same program and (in codegen.rs/wasm_codegen.rs only, and
-// duplicated between the two backends) catch unknown identifiers/calls
-// on their own, at codegen time — the last possible moment, and only on
-// whichever backend you happened to be compiling to. purity.rs and
+// every checker — purity.rs, typecheck.rs, and codegen.rs (and, back
+// when there were two codegen backends, wasm_codegen.rs too) each used
+// to build their own `HashMap<Symbol, &Fn>` from the same program and
+// (in codegen.rs only, and previously duplicated between the two
+// backends) catch unknown identifiers/calls on their own, at codegen
+// time — the last possible moment, and only on whichever backend you
+// happened to be compiling to. purity.rs and
 // typecheck.rs never checked names at all: a typo'd variable or a call
 // to a function that doesn't exist passed both silently (the read side
 // of `resolve_expr` below is the only thing that used to catch that,

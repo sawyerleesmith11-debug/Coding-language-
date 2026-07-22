@@ -17,11 +17,10 @@ default = ["native"]
 # The native (Cranelift/cc) backend pulls in dependencies that only make
 # sense compiling for a real CPU — cranelift-native probes the *host's*
 # architecture, and cranelift-object needs a real object-file/linker
-# pipeline. Neither belongs in kestrelc-web's wasm32-unknown-unknown
-# build, which only needs ast/lexer/parser/purity/wasm_codegen. Gating
-# them behind this feature (off by default for `default-features =
-# false` dependents) keeps them out of that build entirely rather than
-# just unused.
+# pipeline. This feature gate is a holdover from when a wasm32-unknown-
+# unknown build (kestrelc-web, since removed) needed to exclude them;
+# every remaining dependent builds with default features, but the gate
+# is left in place rather than unwound as part of this change.
 native = [
     "dep:cranelift-codegen",
     "dep:cranelift-frontend",
@@ -38,13 +37,9 @@ cranelift-frontend = { version = "0.116", optional = true }
 cranelift-module = { version = "0.116", optional = true }
 cranelift-object = { version = "0.116", optional = true }
 # `kestrelc watch`'s in-process execution path only -- see jit_codegen.rs.
-# Gated behind "native" like every other Cranelift dep, for the same
-# reason (irrelevant to kestrelc-web's wasm32 build).
+# Gated behind "native" like every other Cranelift dep.
 cranelift-jit = { version = "0.116", optional = true }
 cranelift-native = { version = "0.116", optional = true }
-wasm-encoder = "0.253.0"
 # `kestrelc watch` only -- file-system watching for the native-only watch
-# subcommand. Gated behind "native" like the Cranelift deps above, for
-# the same reason (kestrelc-web's wasm32 lib build has no use for it and
-# notify's OS-level watching wouldn't compile there anyway).
+# subcommand. Gated behind "native" like the Cranelift deps above.
 notify = { version = "6", optional = true }

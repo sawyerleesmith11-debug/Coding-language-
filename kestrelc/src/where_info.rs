@@ -1,7 +1,8 @@
-// Shared between both codegen backends (native/Cranelift and WASM) —
-// pure AST analysis, no backend-specific types, so it lives outside
-// codegen.rs (which is gated behind the "native" feature and wouldn't
-// compile for the wasm32 target kestrelc-web builds).
+// Pure AST analysis, no backend-specific types, so it lives outside
+// codegen.rs (which is gated behind the "native" feature). Originally
+// shared between two codegen backends (native/Cranelift and WASM,
+// before the WASM backend was removed); kept as its own module rather
+// than folded into codegen.rs now that native is the only backend.
 
 use crate::ast::*;
 use crate::interner::Symbol;

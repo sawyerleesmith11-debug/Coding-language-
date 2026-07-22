@@ -377,42 +377,6 @@ fn where_clause_call_site_proof_accepts_valid_literal_call() {
 }
 
 #[test]
-fn wasm_backend_where_clause_call_site_proof_accepts_valid_literal_call() {
-    // Same design-doc get_safe example as the native test above, proving
-    // the WASM backend's own copy of the elision fast path (added
-    // alongside the native one — see wasm_codegen.rs's Index/Call arms)
-    // actually runs correctly, not just compiles.
-    let scratch = scratch_dir("wasm_where_ok");
-    let src_path = scratch.join("where_ok.kes");
-    fs::write(
-        &src_path,
-        r#"
-        fn get_safe(arr: [i32; N], i: usize) -> i32 where i < N {
-            return arr[i];
-        }
-        fn main() {
-            let nums = [3, 4, 5, 6];
-            print(get_safe(nums, 2));
-        }
-        "#,
-    )
-    .unwrap();
-
-    let out = Command::new(kestrelc_bin())
-        .arg("--wasm")
-        .arg(&src_path)
-        .current_dir(&scratch)
-        .output()
-        .expect("failed to run kestrelc");
-    assert!(out.status.success(), "kestrelc --wasm failed:\n{}", String::from_utf8_lossy(&out.stderr));
-
-    let wasm_path = scratch.join("where_ok.wasm");
-    let run = run_wasm_via_node(&wasm_path);
-    assert!(run.status.success(), "node failed to run the wasm module:\n{}", String::from_utf8_lossy(&run.stderr));
-    assert_eq!(String::from_utf8_lossy(&run.stdout), "5\n");
-}
-
-#[test]
 fn where_clause_call_site_rejects_provably_invalid_index() {
     let scratch = scratch_dir("where_bad_index");
     let src_path = scratch.join("where_bad_index.kes");
@@ -436,38 +400,6 @@ fn where_clause_call_site_rejects_provably_invalid_index() {
         .output()
         .expect("failed to run kestrelc");
     assert!(!out.status.success(), "kestrelc should have rejected a provably out-of-bounds where-clause call");
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("can't satisfy its own"),
-        "expected a where-clause proof-failure error, got:\n{stderr}"
-    );
-}
-
-#[test]
-fn wasm_backend_where_clause_call_site_rejects_provably_invalid_index() {
-    let scratch = scratch_dir("wasm_where_bad_index");
-    let src_path = scratch.join("where_bad_index.kes");
-    fs::write(
-        &src_path,
-        r#"
-        fn get_safe(arr: [i32; N], i: usize) -> i32 where i < N {
-            return arr[i];
-        }
-        fn main() {
-            let nums = [3, 4, 5, 6];
-            print(get_safe(nums, 9));
-        }
-        "#,
-    )
-    .unwrap();
-
-    let out = Command::new(kestrelc_bin())
-        .arg("--wasm")
-        .arg(&src_path)
-        .current_dir(&scratch)
-        .output()
-        .expect("failed to run kestrelc");
-    assert!(!out.status.success(), "kestrelc --wasm should have rejected a provably out-of-bounds where-clause call");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         stderr.contains("can't satisfy its own"),
@@ -511,194 +443,6 @@ fn where_clause_call_site_rejects_unprovable_dynamic_index() {
 }
 
 #[test]
-fn wasm_backend_where_clause_call_site_rejects_unprovable_dynamic_index() {
-    let scratch = scratch_dir("wasm_where_unprovable");
-    let src_path = scratch.join("where_unprovable.kes");
-    fs::write(
-        &src_path,
-        r#"
-        fn get_safe(arr: [i32; N], i: usize) -> i32 where i < N {
-            return arr[i];
-        }
-        fn main() {
-            let nums = [3, 4, 5, 6];
-            let idx = 2;
-            print(get_safe(nums, idx));
-        }
-        "#,
-    )
-    .unwrap();
-
-    let out = Command::new(kestrelc_bin())
-        .arg("--wasm")
-        .arg(&src_path)
-        .current_dir(&scratch)
-        .output()
-        .expect("failed to run kestrelc");
-    assert!(!out.status.success(), "kestrelc --wasm should have rejected an unprovable where-clause call site");
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("can't prove"),
-        "expected a where-clause unprovable-call-site error, got:\n{stderr}"
-    );
-}
-
-#[test]
-fn wasm_backend_compiles_and_runs_fibonacci_kes_with_correct_output() {
-    // Actually instantiates and runs the compiled .wasm through Node's
-    // WebAssembly API (the same host environment the browser editor
-    // would provide) — not just checking the bytes look plausible.
-    let scratch = scratch_dir("wasm_fib");
-    let src = repo_root().join("examples").join("fibonacci.kes");
-    let out = Command::new(kestrelc_bin())
-        .arg("--wasm")
-        .arg(&src)
-        .current_dir(&scratch)
-        .output()
-        .expect("failed to run kestrelc");
-    assert!(out.status.success(), "kestrelc --wasm failed:\n{}", String::from_utf8_lossy(&out.stderr));
-
-    let wasm_path = scratch.join("fibonacci.wasm");
-    assert!(wasm_path.exists(), "expected fibonacci.wasm to be written");
-
-    let run = run_wasm_via_node(&wasm_path);
-    assert!(run.status.success(), "node failed to run the wasm module:\n{}", String::from_utf8_lossy(&run.stderr));
-
-    let expected = "\
-fib 0 = 0
-fib 1 = 1
-fib 2 = 1
-fib 3 = 2
-fib 4 = 3
-fib 5 = 5
-fib 6 = 8
-fib 7 = 13
-fib 8 = 21
-fib 9 = 34
-";
-    assert_eq!(String::from_utf8_lossy(&run.stdout), expected);
-}
-
-fn run_wasm_via_node(wasm_path: &std::path::Path) -> std::process::Output {
-    // Writes each print()'s line to stdout as soon as it completes
-    // (isLast), same as kestrel-editor.html's real host imports (see
-    // its `flush()`) — not batched until `main()` returns. That
-    // difference matters for a program that traps partway through: any
-    // output already printed before the trap is real, observable
-    // output in the actual product, and this harness needs to
-    // reproduce that to test it (e.g. the friendly out-of-bounds
-    // message a trap now prints right before it happens).
-    let node_script = r#"
-        const fs = require("fs");
-        const bytes = fs.readFileSync(process.argv[1]);
-        let cur = [];
-        let instance;
-        const imports = { env: {
-            print_i64: (v, isLast) => { cur.push(v.toString()); if (isLast) { process.stdout.write(cur.join(" ") + "\n"); cur = []; } },
-            print_str: (ptr, len, isLast) => {
-                const bytes = new Uint8Array(instance.exports.memory.buffer, ptr, len);
-                cur.push(Buffer.from(bytes).toString("utf8"));
-                if (isLast) { process.stdout.write(cur.join(" ") + "\n"); cur = []; }
-            },
-        }};
-        WebAssembly.instantiate(bytes, imports).then(({ instance: inst }) => {
-            instance = inst;
-            inst.exports.main();
-        }).catch((e) => { console.error(e); process.exit(1); });
-    "#;
-    Command::new("node")
-        .arg("-e")
-        .arg(node_script)
-        .arg(wasm_path)
-        .output()
-        .expect("failed to run node (required for WASM backend tests)")
-}
-
-#[test]
-fn wasm_backend_compiles_and_runs_basics_kes_with_correct_output() {
-    // basics.kes exercises array literals, an array parameter, indexing,
-    // and a `where`-guarded call — the WASM backend's array support.
-    let scratch = scratch_dir("wasm_basics");
-    let src = repo_root().join("examples").join("basics.kes");
-    let out = Command::new(kestrelc_bin())
-        .arg("--wasm")
-        .arg(&src)
-        .current_dir(&scratch)
-        .output()
-        .expect("failed to run kestrelc");
-    assert!(out.status.success(), "kestrelc --wasm failed:\n{}", String::from_utf8_lossy(&out.stderr));
-
-    let wasm_path = scratch.join("basics.wasm");
-    let run = run_wasm_via_node(&wasm_path);
-    assert!(run.status.success(), "node failed to run the wasm module:\n{}", String::from_utf8_lossy(&run.stderr));
-
-    let expected = "\
-square: 9
-square: 16
-square: 25
-square: 36
-sum of squares(3,4) = 25
-safe get nums[2] = 5
-";
-    assert_eq!(String::from_utf8_lossy(&run.stdout), expected);
-}
-
-#[test]
-fn wasm_backend_traps_on_out_of_bounds_array_index() {
-    let scratch = scratch_dir("wasm_oob");
-    let src_path = scratch.join("oob.kes");
-    std::fs::create_dir_all(&scratch).unwrap();
-    std::fs::write(&src_path, "fn main() {\n    let a = [1, 2, 3];\n    let i = 5;\n    print(\"val =\", a[i]);\n}\n").unwrap();
-
-    let out = Command::new(kestrelc_bin())
-        .arg("--wasm")
-        .arg(&src_path)
-        .current_dir(&scratch)
-        .output()
-        .expect("failed to run kestrelc");
-    assert!(out.status.success(), "kestrelc --wasm failed:\n{}", String::from_utf8_lossy(&out.stderr));
-
-    let wasm_path = scratch.join("oob.wasm");
-    let run = run_wasm_via_node(&wasm_path);
-    assert!(!run.status.success(), "expected the wasm module to trap on out-of-bounds access");
-    let stderr = String::from_utf8_lossy(&run.stderr);
-    assert!(
-        stderr.contains("unreachable"),
-        "expected a wasm 'unreachable' trap, got:\n{stderr}"
-    );
-    // The friendly message is printed through the same host print
-    // imports the program's own print() calls use, right before the
-    // trap — real, observable output in the actual product (see
-    // run_wasm_via_node's per-line flushing), not lost by the trap.
-    let stdout = String::from_utf8_lossy(&run.stdout);
-    assert!(
-        stdout.contains("kestrelc: Index 5 out of bounds for array of length 3"),
-        "expected a friendly bounds-check failure message, got:\n{stdout}"
-    );
-}
-
-#[test]
-fn wasm_backend_rejects_statically_provable_out_of_bounds_index_at_compile_time() {
-    let scratch = scratch_dir("wasm_static_oob");
-    let src_path = scratch.join("bad.kes");
-    std::fs::create_dir_all(&scratch).unwrap();
-    std::fs::write(&src_path, "fn main() {\n    let a = [1, 2, 3];\n    print(\"val =\", a[9]);\n}\n").unwrap();
-
-    let out = Command::new(kestrelc_bin())
-        .arg("--wasm")
-        .arg(&src_path)
-        .current_dir(&scratch)
-        .output()
-        .expect("failed to run kestrelc");
-    assert!(!out.status.success(), "kestrelc --wasm should have rejected a statically-provable out-of-bounds index");
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("proven at compile time"),
-        "expected a compile-time bounds-proof error, got:\n{stderr}"
-    );
-}
-
-#[test]
 fn native_compile_cache_hit_reuses_the_object_file_and_still_produces_correct_output() {
     let scratch = scratch_dir("cache_native");
     let cache_dir = scratch.join("cache");
@@ -736,43 +480,6 @@ fn native_compile_cache_hit_reuses_the_object_file_and_still_produces_correct_ou
 }
 
 #[test]
-fn wasm_compile_cache_hit_produces_byte_identical_output() {
-    let scratch = scratch_dir("cache_wasm");
-    let cache_dir = scratch.join("cache");
-    let src = repo_root().join("examples").join("fibonacci.kes");
-
-    for _ in 0..2 {
-        let out = Command::new(kestrelc_bin())
-            .arg("--wasm")
-            .arg(&src)
-            .current_dir(&scratch)
-            .env("KESTRELC_CACHE_DIR", &cache_dir)
-            .output()
-            .expect("failed to run kestrelc");
-        assert!(out.status.success(), "kestrelc --wasm failed:\n{}", String::from_utf8_lossy(&out.stderr));
-    }
-
-    // Confirm the second run really did hit the cache, not just happen
-    // to produce the same bytes independently.
-    let second = Command::new(kestrelc_bin())
-        .arg("--wasm")
-        .arg(&src)
-        .current_dir(&scratch)
-        .env("KESTRELC_CACHE_DIR", &cache_dir)
-        .output()
-        .expect("failed to run kestrelc");
-    assert!(
-        String::from_utf8_lossy(&second.stdout).contains("(cached)"),
-        "expected a cache hit by the third invocation"
-    );
-
-    let wasm_path = scratch.join("fibonacci.wasm");
-    let run = run_wasm_via_node(&wasm_path);
-    assert!(run.status.success(), "node failed to run the cached wasm module:\n{}", String::from_utf8_lossy(&run.stderr));
-    assert!(String::from_utf8_lossy(&run.stdout).starts_with("fib 0 = 0"));
-}
-
-#[test]
 fn compile_cache_misses_when_source_changes() {
     let scratch = scratch_dir("cache_invalidation");
     let cache_dir = scratch.join("cache");
@@ -780,7 +487,6 @@ fn compile_cache_misses_when_source_changes() {
     std::fs::write(&src_path, "fn main() {\n    print(\"v1\");\n}\n").unwrap();
 
     let first = Command::new(kestrelc_bin())
-        .arg("--wasm")
         .arg(&src_path)
         .current_dir(&scratch)
         .env("KESTRELC_CACHE_DIR", &cache_dir)
@@ -790,7 +496,6 @@ fn compile_cache_misses_when_source_changes() {
 
     std::fs::write(&src_path, "fn main() {\n    print(\"v2, a different program\");\n}\n").unwrap();
     let second = Command::new(kestrelc_bin())
-        .arg("--wasm")
         .arg(&src_path)
         .current_dir(&scratch)
         .env("KESTRELC_CACHE_DIR", &cache_dir)
@@ -1033,69 +738,6 @@ fn parallel_map_rejects_an_array_parameter_source_array() {
     );
 }
 
-#[test]
-fn wasm_backend_parallel_map_produces_correct_results() {
-    let scratch = scratch_dir("wasm_pmap");
-    let src_path = scratch.join("pmap.kes");
-    fs::write(
-        &src_path,
-        r#"
-        pure fn square(x: i32) -> i32 { return x * x; }
-        fn main() {
-            let nums = [1, 2, 3, 4, 5];
-            let squares = parallel_map(square, nums);
-            print(squares[0], squares[1], squares[2], squares[3], squares[4]);
-        }
-        "#,
-    )
-    .unwrap();
-
-    let out = Command::new(kestrelc_bin())
-        .arg("--wasm")
-        .arg(&src_path)
-        .current_dir(&scratch)
-        .output()
-        .expect("failed to run kestrelc");
-    assert!(out.status.success(), "kestrelc --wasm failed:\n{}", String::from_utf8_lossy(&out.stderr));
-
-    let wasm_path = scratch.join("pmap.wasm");
-    let run = run_wasm_via_node(&wasm_path);
-    assert!(run.status.success(), "node failed to run the wasm module:\n{}", String::from_utf8_lossy(&run.stderr));
-    assert_eq!(String::from_utf8_lossy(&run.stdout), "1 4 9 16 25\n");
-}
-
-#[test]
-fn wasm_backend_chained_parallel_map_calls_fuse_and_still_produce_correct_output() {
-    let scratch = scratch_dir("wasm_pmap_fused");
-    let src_path = scratch.join("pmap_fused.kes");
-    fs::write(
-        &src_path,
-        r#"
-        pure fn square(x: i32) -> i32 { return x * x; }
-        pure fn inc(x: i32) -> i32 { return x + 1; }
-        fn main() {
-            let a = parallel_map(square, [1, 2, 3, 4]);
-            let b = parallel_map(inc, a);
-            print(b[0], b[1], b[2], b[3]);
-        }
-        "#,
-    )
-    .unwrap();
-
-    let out = Command::new(kestrelc_bin())
-        .arg("--wasm")
-        .arg(&src_path)
-        .current_dir(&scratch)
-        .output()
-        .expect("failed to run kestrelc");
-    assert!(out.status.success(), "kestrelc --wasm failed:\n{}", String::from_utf8_lossy(&out.stderr));
-
-    let wasm_path = scratch.join("pmap_fused.wasm");
-    let run = run_wasm_via_node(&wasm_path);
-    assert!(run.status.success(), "node failed to run the wasm module:\n{}", String::from_utf8_lossy(&run.stderr));
-    assert_eq!(String::from_utf8_lossy(&run.stdout), "2 5 10 17\n");
-}
-
 // ============================== type checker ==============================
 
 fn expect_type_error(scratch_name: &str, src: &str, expected_substr: &str) {
@@ -1186,27 +828,6 @@ fn typecheck_does_not_flag_a_boolean_returning_function_used_as_a_condition() {
     let bin = scratch.join("prog");
     let run = Command::new(&bin).output().expect("failed to run compiled binary");
     assert_eq!(native_stdout(&run), "even\n");
-}
-
-#[test]
-fn wasm_backend_typecheck_rejects_the_same_ill_typed_program() {
-    let scratch = scratch_dir("wasm_tc");
-    let src_path = scratch.join("prog.kes");
-    fs::write(&src_path, "fn main() {\n    print(5 + true);\n}\n").unwrap();
-
-    let out = Command::new(kestrelc_bin())
-        .arg("--wasm")
-        .arg(&src_path)
-        .current_dir(&scratch)
-        .output()
-        .expect("failed to run kestrelc");
-    assert!(!out.status.success(), "kestrelc --wasm should have rejected this program");
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("needs two numbers"), "expected the type error, got:\n{stderr}");
-    assert!(
-        stderr.contains("prog.kes:2:") && stderr.contains('^'),
-        "expected a file:line:col: + caret diagnostic, got:\n{stderr}"
-    );
 }
 
 // ==================== runtime call-count profile / inlining ====================
@@ -1879,65 +1500,6 @@ fn a_pure_fn_with_a_struct_param_gives_correct_results_across_multiple_calls() {
 }
 
 #[test]
-fn wasm_backend_struct_local_can_be_constructed_and_its_fields_read() {
-    let scratch = scratch_dir("wasm_struct_local");
-    let src_path = scratch.join("prog.kes");
-    fs::write(
-        &src_path,
-        "struct Point { x: i64, y: i64 }\n\
-         fn main() {\n\
-         \x20   let p = Point { x: 3, y: 4 };\n\
-         \x20   print(p.x, p.y);\n\
-         }\n",
-    )
-    .unwrap();
-
-    let out = Command::new(kestrelc_bin())
-        .arg("--wasm")
-        .arg(&src_path)
-        .current_dir(&scratch)
-        .output()
-        .expect("failed to run kestrelc");
-    assert!(out.status.success(), "compile failed:\n{}", String::from_utf8_lossy(&out.stderr));
-
-    let wasm_path = scratch.join("prog.wasm");
-    assert!(wasm_path.exists(), "expected prog.wasm to be written");
-    let run = run_wasm_via_node(&wasm_path);
-    assert!(run.status.success(), "node failed to run the wasm module:\n{}", String::from_utf8_lossy(&run.stderr));
-    assert_eq!(String::from_utf8_lossy(&run.stdout), "3 4\n");
-}
-
-#[test]
-fn wasm_backend_struct_can_be_passed_as_a_function_parameter() {
-    let scratch = scratch_dir("wasm_struct_param");
-    let src_path = scratch.join("prog.kes");
-    fs::write(
-        &src_path,
-        "struct Point { x: i64, y: i64 }\n\
-         pure fn dist_sq(p: Point) -> i64 { return p.x * p.x + p.y * p.y; }\n\
-         fn main() {\n\
-         \x20   let p = Point { x: 3, y: 4 };\n\
-         \x20   print(dist_sq(p));\n\
-         }\n",
-    )
-    .unwrap();
-
-    let out = Command::new(kestrelc_bin())
-        .arg("--wasm")
-        .arg(&src_path)
-        .current_dir(&scratch)
-        .output()
-        .expect("failed to run kestrelc");
-    assert!(out.status.success(), "compile failed:\n{}", String::from_utf8_lossy(&out.stderr));
-
-    let wasm_path = scratch.join("prog.wasm");
-    assert!(wasm_path.exists(), "expected prog.wasm to be written");
-    let run = run_wasm_via_node(&wasm_path);
-    assert!(run.status.success(), "node failed to run the wasm module:\n{}", String::from_utf8_lossy(&run.stderr));
-    assert_eq!(String::from_utf8_lossy(&run.stdout), "25\n");
-}
-
-#[test]
 fn rejects_a_struct_decl_with_an_array_typed_field_via_the_real_cli_path() {
     // All the other struct tests above are success-path only. This
     // proves a resolve.rs struct.rs-validation error (check_struct_decls
@@ -2048,8 +1610,7 @@ fn a_type_mismatch_deep_in_a_statement_points_at_the_sub_expression_not_the_stat
 fn a_native_codegen_error_now_carries_a_full_caret_diagnostic() {
     // Purity/parallel_map/type-check errors already got real
     // file:line:col: + caret diagnostics (see the earlier caret tests
-    // above) — codegen.rs's own errors, and wasm_codegen.rs's (see the
-    // wasm-backend counterpart below), used to be message-only, then
+    // above) — codegen.rs's own errors used to be message-only, then
     // just a bare `line:col:` prefix. Unifying every error type behind
     // one KestrelcError{kind,message,span} (see error.rs) meant codegen
     // errors inherited a real Span (with a real len, from Stmt) for
@@ -2076,37 +1637,6 @@ fn a_native_codegen_error_now_carries_a_full_caret_diagnostic() {
     assert!(
         stderr.contains("prog.kes:3:5:") && stderr.contains("it can only be indexed") && stderr.contains('^'),
         "expected a full file:line:col: + caret diagnostic on the codegen error, got:\n{stderr}"
-    );
-}
-
-#[test]
-fn a_wasm_codegen_error_also_now_carries_a_full_caret_diagnostic() {
-    // Same program, same error, through the WASM backend instead — this
-    // used to be entirely message-only (a documented remaining gap after
-    // the native backend got its line:col: prefix); unifying error types
-    // closed that gap for both backends at once, not just native.
-    let scratch = scratch_dir("wasm_codegen_err_pos");
-    let src_path = scratch.join("prog.kes");
-    fs::write(
-        &src_path,
-        "fn main() {\n\
-         \x20   let a = [1, 2, 3];\n\
-         \x20   print(a);\n\
-         }\n",
-    )
-    .unwrap();
-
-    let out = Command::new(kestrelc_bin())
-        .arg("--wasm")
-        .arg(&src_path)
-        .current_dir(&scratch)
-        .output()
-        .expect("failed to run kestrelc");
-    assert!(!out.status.success(), "kestrelc --wasm should reject using an array value directly");
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("prog.kes:3:5:") && stderr.contains("it can only be indexed") && stderr.contains('^'),
-        "expected a full file:line:col: + caret diagnostic on the wasm codegen error, got:\n{stderr}"
     );
 }
 
@@ -2333,77 +1863,6 @@ fn range_for_sums_an_array_correctly() {
     let bin = scratch.join("prog");
     let run = Command::new(&bin).output().expect("failed to run compiled binary");
     assert_eq!(native_stdout(&run), "150\n");
-}
-
-#[test]
-fn wasm_backend_range_for_sums_an_array_correctly() {
-    // Mirrors range_for_sums_an_array_correctly (codegen.rs's native
-    // path) -- same program, WASM backend instead.
-    let scratch = scratch_dir("wasm_range_for_sum");
-    let src_path = scratch.join("prog.kes");
-    fs::write(
-        &src_path,
-        "fn main() {\n\
-         \x20   let arr = [10, 20, 30, 40, 50];\n\
-         \x20   let total = 0;\n\
-         \x20   for i from 0 to 5 {\n\
-         \x20       total = total + arr[i];\n\
-         \x20   }\n\
-         \x20   print(total);\n\
-         }\n",
-    )
-    .unwrap();
-
-    let out = Command::new(kestrelc_bin())
-        .arg("--wasm")
-        .arg(&src_path)
-        .current_dir(&scratch)
-        .output()
-        .expect("failed to run kestrelc");
-    assert!(out.status.success(), "kestrelc --wasm failed:\n{}", String::from_utf8_lossy(&out.stderr));
-
-    let wasm_path = scratch.join("prog.wasm");
-    let run = run_wasm_via_node(&wasm_path);
-    assert!(run.status.success(), "node failed to run the wasm module:\n{}", String::from_utf8_lossy(&run.stderr));
-    assert_eq!(String::from_utf8_lossy(&run.stdout), "150\n");
-}
-
-#[test]
-fn wasm_backend_nested_range_for_uses_separate_scratch_locals_correctly() {
-    // Regression test for the per-RangeFor-occurrence scratch local design
-    // (see wasm_codegen.rs's count_range_fors/range_for_end_locals) -- an
-    // inner range-for's `end` value must not clobber the outer range-for's
-    // own `end` value if they shared one scratch local instead of one each.
-    // Uses asymmetric bounds (outer 0-2, inner 0-4) so a shared-local bug
-    // would produce wrong iteration counts (not 2*4=8).
-    let scratch = scratch_dir("wasm_nested_range_for");
-    let src_path = scratch.join("prog.kes");
-    fs::write(
-        &src_path,
-        "fn main() {\n\
-         \x20   let total = 0;\n\
-         \x20   for i from 0 to 2 {\n\
-         \x20       for j from 0 to 4 {\n\
-         \x20           total = total + 1;\n\
-         \x20       }\n\
-         \x20   }\n\
-         \x20   print(total);\n\
-         }\n",
-    )
-    .unwrap();
-
-    let out = Command::new(kestrelc_bin())
-        .arg("--wasm")
-        .arg(&src_path)
-        .current_dir(&scratch)
-        .output()
-        .expect("failed to run kestrelc");
-    assert!(out.status.success(), "kestrelc --wasm failed:\n{}", String::from_utf8_lossy(&out.stderr));
-
-    let wasm_path = scratch.join("prog.wasm");
-    let run = run_wasm_via_node(&wasm_path);
-    assert!(run.status.success(), "node failed to run the wasm module:\n{}", String::from_utf8_lossy(&run.stderr));
-    assert_eq!(String::from_utf8_lossy(&run.stdout), "8\n");
 }
 
 #[test]
