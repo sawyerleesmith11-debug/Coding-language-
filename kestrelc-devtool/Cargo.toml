@@ -1,0 +1,8 @@
+[package]
+name = "kestrelc-devtool"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+kestrelc = { path = "../kestrelc" }
+tiny_http = "0.12"
