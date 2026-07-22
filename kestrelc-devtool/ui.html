@@ -1,2 +1,125 @@
 <!DOCTYPE html>
-<html><body><h1>kestrelc-devtool placeholder</h1></body></html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>kestrelc-devtool</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  /* Same palette as kestrel-editor.html, reused directly -- this page
+     shares no code with it otherwise (no WASM, no kestrel.js: this
+     talks to the real native kestrelc via /run on this same server,
+     see runner.rs). */
+  :root {
+    --bg: #12151c;
+    --surface: #1b2029;
+    --surface-2: #232a36;
+    --line: #2c3340;
+    --text: #e8e3d9;
+    --text-dim: #8b93a3;
+    --rust: #c9803d;
+    --rust-dim: #8a5d30;
+    --wing: #5c7a99;
+    --danger: #d9694a;
+    --ok: #7fae7a;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: var(--bg); color: var(--text);
+    font-family: 'JetBrains Mono', monospace;
+  }
+  body { display: flex; flex-direction: column; height: 100vh; }
+
+  header {
+    display: flex; align-items: center; gap: 12px;
+    padding: 14px 18px; border-bottom: 1px solid var(--line);
+    background: var(--surface); flex-shrink: 0;
+  }
+  h1 {
+    font-family: 'Space Grotesk', sans-serif;
+    font-size: 18px; font-weight: 700; margin: 0; flex: 1;
+  }
+  h1 span { color: var(--rust); }
+
+  #run-btn {
+    background: var(--rust); color: #16110b; border: none;
+    font-family: 'Space Grotesk', sans-serif; font-weight: 700;
+    font-size: 14px; padding: 9px 18px; border-radius: 8px; cursor: pointer;
+  }
+  #run-btn:disabled { opacity: 0.5; cursor: default; }
+  #run-btn:active:not(:disabled) { background: var(--rust-dim); }
+
+  #status {
+    font-size: 12px; color: var(--text-dim); padding: 8px 18px;
+    background: var(--surface); border-bottom: 1px solid var(--line);
+    flex-shrink: 0; min-height: 1.4em;
+  }
+  #status .engine { color: var(--wing); font-weight: 600; }
+  #status .ok { color: var(--ok); }
+  #status .err { color: var(--danger); }
+
+  main {
+    flex: 1; display: flex; min-height: 0;
+  }
+  #code, #output {
+    flex: 1; margin: 0; padding: 16px 18px; border: none; outline: none;
+    background: var(--bg); color: var(--text);
+    font-family: 'JetBrains Mono', monospace; font-size: 13px; line-height: 1.5;
+    resize: none; white-space: pre-wrap; overflow: auto;
+  }
+  #code { border-right: 1px solid var(--line); }
+  #output.err { color: var(--danger); }
+  #output.ok { color: var(--text); }
+</style>
+</head>
+<body>
+<header>
+  <h1>kestrelc<span>-devtool</span></h1>
+  <button id="run-btn">Run</button>
+</header>
+<div id="status">ready</div>
+<main>
+  <textarea id="code" spellcheck="false">fn main() {
+    print("hi", 42);
+}
+</textarea>
+  <pre id="output"></pre>
+</main>
+<script>
+const runBtn = document.getElementById('run-btn');
+const statusEl = document.getElementById('status');
+const codeEl = document.getElementById('code');
+const outEl = document.getElementById('output');
+
+async function run() {
+  runBtn.disabled = true;
+  statusEl.textContent = 'running...';
+  outEl.textContent = '';
+  outEl.className = '';
+  try {
+    const res = await fetch('/run', { method: 'POST', body: codeEl.value });
+    const data = await res.json();
+    const statusClass = data.ok ? 'ok' : 'err';
+    statusEl.innerHTML =
+      `<span class="engine">${data.engine}</span> — ` +
+      `compile ${data.compile_ms.toFixed(2)}ms, run ${data.run_ms.toFixed(2)}ms — ` +
+      `<span class="${statusClass}">${data.ok ? 'ok' : 'failed'}</span>`;
+    outEl.textContent = data.ok ? data.output : data.error;
+    outEl.className = statusClass;
+  } catch (e) {
+    statusEl.innerHTML = `<span class="err">request failed: ${e.message}</span>`;
+  } finally {
+    runBtn.disabled = false;
+  }
+}
+
+runBtn.addEventListener('click', run);
+codeEl.addEventListener('keydown', (e) => {
+  // Ctrl+Enter to run, matching kestrel-editor.html's own shortcut.
+  if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') run();
+});
+</script>
+</body>
+</html>
