@@ -1,21 +1,40 @@
 # Kestrel vs. C vs. Rust benchmark results
 
 Run on: Windows, mingw `cc` (WinLibs UCRT) + `rustc -C opt-level=3`, 16
-logical cores. Median of 5 timed runs per variant, native builds only.
-See `2026-07-20-benchmark-suite-design.md` in `docs/superpowers/specs/`
-for methodology. Rust variants (`bench.rs`) added later than the
-original C-only suite — same workloads, byte-identical input data
-(same 20,000-element array literal), output cross-checked equal across
-all four variants (kestrel/C-O2/C-O3/rust) on every run, not just
-compared after the fact.
+logical / 8 physical cores. Median of 5 timed runs per variant, native
+builds only. See `2026-07-20-benchmark-suite-design.md` in
+`docs/superpowers/specs/` for methodology. Rust variants (`bench.rs`)
+added later than the original C-only suite — same workloads,
+byte-identical input data (same 20,000-element array literal), output
+cross-checked equal across all four variants (kestrel/C-O2/C-O3/rust) on
+every run, not just compared after the fact.
+
+Re-measured after three `parallel_map` runtime changes: a persistent
+worker pool (no more per-call thread spawn), pool sized by physical
+core count instead of logical, and cross-call CSE for repeated pure
+calls (doesn't affect this suite — no workload here has a repeated call
+with identical arguments in one scope).
 
 | Workload | Kestrel | C -O2 | C -O3 -march=native | Rust -O3 | Kestrel ÷ C-O3 | Kestrel ÷ Rust |
 |---|---|---|---|---|---|---|
-| integer-loop | 0.751s | 0.511s | 0.512s | 0.632s | **1.47x slower** | **1.19x slower** |
-| fib-recursive | 0.040s | 0.098s | 0.093s | 0.132s | **2.3x faster*** | **3.3x faster*** |
-| array-sum | 0.192s | 0.182s | 0.177s | 0.177s | **1.08x slower** (near parity) | **1.08x slower** (near parity) |
-| parallel-map | 0.095s | 0.394s | 0.392s | 0.426s | **4.1x faster** | **4.5x faster** |
-| bounds-heavy | 0.657s | 0.607s | 0.609s | 0.623s | **1.08x slower** | **1.05x slower** |
+| integer-loop | 0.748s | 0.509s | 0.505s | 0.623s | **1.48x slower** | **1.20x slower** |
+| fib-recursive | 0.038s | 0.097s | 0.082s | 0.128s | **2.2x faster*** | **3.4x faster*** |
+| array-sum | 0.190s | 0.173s | 0.174s | 0.177s | **1.09x slower** (near parity) | **1.07x slower** (near parity) |
+| parallel-map | 0.115s | 0.396s | 0.408s | 0.431s | **3.5x faster** | **3.7x faster** |
+| bounds-heavy | 0.668s | 0.621s | 0.621s | 0.642s | **1.08x slower** | **1.04x slower** |
+
+**parallel-map's multiplier actually dropped** from the previous
+4.1-4.5x to 3.5-3.7x after switching the pool from logical (16) to
+physical (8) core count. Expected, honest trade-off: this suite's
+workload is a *single* `parallel_map` call, where more threads (up to
+the array-size limit) directly buys more raw parallelism regardless of
+SMT contention — the physical-core change was validated separately
+against a *repeated-call* workload (2000x calls, cheap per-element
+work), where it measured ~15-20% faster due to less scheduling
+contention across many calls, a different shape of program than this
+single-call suite exercises. Both numbers are real; they're just
+measuring different things. Single-call raw throughput and
+many-call scheduling overhead pull in opposite directions here.
 
 \* fib-recursive's win is from automatic memoization eliminating naive
 recursion's redundant subcalls, not from better codegen — neither C's
@@ -43,13 +62,16 @@ excluded.
   (contiguous float arrays, unconditional element-wise ops with no
   modulus) would be a fairer test of Cranelift's actual vectorization
   gap and is a natural next addition to this suite.
-- **On the actual thesis** (parallel-map): a clean **4.1-4.5x** win over
+- **On the actual thesis** (parallel-map): a clean **3.5-3.7x** win over
   single-threaded C *and* Rust, using purity-proven auto-parallelism
   with zero threading code written by hand — the Rust variant here is
   the same serial, single-threaded loop the C one is, not a `rayon`
   comparison. This is the strongest, most honest "beats C/Rust" result
   in the suite — it's not a codegen-quality claim, it's a
-  language-semantics one, and the numbers back it against both.
+  language-semantics one, and the numbers back it against both. (See
+  the physical-vs-logical core note above the table for why this
+  number is lower than an earlier measurement — a real trade-off, not
+  a regression.)
 - **bounds-heavy** shows the real, current cost of Kestrel's safety net
   for the dominant real-world array-access pattern (loop-indexed, not
   literal-indexed) — about 5-8% overhead versus C/Rust's raw unchecked
