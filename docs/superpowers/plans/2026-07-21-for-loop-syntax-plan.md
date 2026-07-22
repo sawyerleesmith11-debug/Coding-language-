@@ -1130,16 +1130,58 @@ git commit -m "Add JIT codegen and eligibility support for RangeFor"
 
 ---
 
-## Task 7: Fusion and CSE support for `RangeFor` bodies
+## Task 7: Fusion, CSE, and hot-fn inlining support for `RangeFor` bodies
+
+**Amendment note:** the original version of this task covered only `fusion.rs`/`cse.rs`. During Task 2's implementation, a third AST-to-AST pass, `inline.rs` (hot-fn inlining, gated on profile data — see `inline_hot_fns`), was discovered to also have two exhaustive `Stmt` matches with no `RangeFor` arm, missed during this plan's original research. Folded in here since it's the same category of pass (an AST-to-AST optimization walker recursing into loop bodies) as fusion/CSE, not because it was in scope from the start.
 
 **Files:**
 - Modify: `kestrelc/src/fusion.rs:257-269` (`fuse_body`'s nested-block recursion)
 - Modify: `kestrelc/src/cse.rs:139-180ish` (`cse_block`'s statement match)
-- Test: `kestrelc/src/fusion.rs`, `kestrelc/src/cse.rs` (each already has an inline `#[cfg(test)] mod tests`)
+- Modify: `kestrelc/src/inline.rs:93-119` (`walk_stmts_exprs`) and `kestrelc/src/inline.rs:251-283` (`inline_stmts`)
+- Test: `kestrelc/src/fusion.rs`, `kestrelc/src/cse.rs`, `kestrelc/src/inline.rs` (each already has an inline `#[cfg(test)] mod tests`)
 
 **Interfaces:**
 - Consumes: `Stmt::RangeFor { var, start, end, body, span }` (Task 1).
-- Produces: no new public interface — a `parallel_map` chain or a repeated pure call inside a `RangeFor` body gets the same optimization treatment it would get inside an equivalent `while` loop's body.
+- Produces: no new public interface — a `parallel_map` chain, a repeated pure call, or a hot inlinable call inside a `RangeFor` body gets the same optimization treatment it would get inside an equivalent `while` loop's body.
+
+- [ ] **Step 0a: Add the `RangeFor` arm to `inline.rs`'s `walk_stmts_exprs`**
+
+In `kestrelc/src/inline.rs`, in `walk_stmts_exprs` (starts at line 93), add a new arm right after the existing `Stmt::While` arm (lines 106-109):
+
+```rust
+            Stmt::While { cond, body, .. } => {
+                on_expr(cond);
+                walk_stmts_exprs(body, on_expr);
+            }
+            Stmt::RangeFor { start, end, body, .. } => {
+                on_expr(start);
+                on_expr(end);
+                walk_stmts_exprs(body, on_expr);
+            }
+```
+
+- [ ] **Step 0b: Add the `RangeFor` arm to `inline.rs`'s `inline_stmts`**
+
+In the same file, in `inline_stmts` (starts at line 251), add a new arm right after the existing `Stmt::While` arm (lines 267-271):
+
+```rust
+            Stmt::While { cond, body, span } => Stmt::While {
+                cond: inline_expr(cond, candidates),
+                body: inline_stmts(body, candidates),
+                span: *span,
+            },
+            Stmt::RangeFor { var, start, end, body, span } => Stmt::RangeFor {
+                var: *var,
+                start: inline_expr(start, candidates),
+                end: inline_expr(end, candidates),
+                body: inline_stmts(body, candidates),
+                span: *span,
+            },
+```
+
+- [ ] **Step 0c: Write a failing inlining test**
+
+Check `kestrelc/src/inline.rs`'s existing `#[cfg(test)] mod tests` block for its test-helper pattern (likely calls `inline_hot_fns` directly with a constructed `profile: HashMap<String, u64>`), then add one test confirming a hot, small, expression-bodied pure function called inside a `RangeFor` body still gets inlined — mirror whatever existing test already proves this for a `while`-bodied call site (search for an existing test asserting inlining happens inside a loop body; if none exists for `while` either, write the `RangeFor` version following this file's general test pattern: construct a program with a `RangeFor` body containing a call to a small hot pure fn, call `inline_hot_fns` with that fn's name present with a high count in the profile map, assert the call site's AST no longer contains a `Call` to that function name, confirming substitution happened).
 
 - [ ] **Step 1: Add the `RangeFor` arm to `fuse_body`'s nested-block recursion**
 
@@ -1246,8 +1288,8 @@ Expected: every new test from Tasks 1-7 passes, plus the entire pre-existing sui
 - [ ] **Step 6: Commit**
 
 ```bash
-git add kestrelc/src/fusion.rs kestrelc/src/cse.rs
-git commit -m "Add RangeFor support to fusion and CSE passes"
+git add kestrelc/src/fusion.rs kestrelc/src/cse.rs kestrelc/src/inline.rs
+git commit -m "Add RangeFor support to fusion, CSE, and hot-fn inlining passes"
 ```
 
 ---
