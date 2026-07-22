@@ -4,6 +4,8 @@
 // docs/superpowers/specs/2026-07-21-devtool-editor-design.md for why
 // this exists instead of extending kestrel-editor.html's WASM path.
 
+mod runner;
+
 use std::process::Command;
 use tiny_http::{Header, Response, Server};
 
@@ -37,13 +39,23 @@ fn open_browser(url: &str) {
     }
 }
 
-fn handle_request(request: tiny_http::Request) {
+fn handle_request(mut request: tiny_http::Request) {
     let method = request.method().clone();
     let url = request.url().to_string();
     match (&method, url.as_str()) {
         (tiny_http::Method::Get, "/") => {
             let header = Header::from_bytes(&b"Content-Type"[..], &b"text/html; charset=utf-8"[..]).unwrap();
             let _ = request.respond(Response::from_string(UI_HTML).with_header(header));
+        }
+        (tiny_http::Method::Post, "/run") => {
+            let mut body = String::new();
+            if request.as_reader().read_to_string(&mut body).is_err() {
+                let _ = request.respond(Response::from_string("bad request body").with_status_code(400));
+                return;
+            }
+            let result = runner::run_source(&body);
+            let header = Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap();
+            let _ = request.respond(Response::from_string(result.to_json()).with_header(header));
         }
         _ => {
             let _ = request.respond(Response::from_string("not found").with_status_code(404));
