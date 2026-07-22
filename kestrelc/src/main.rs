@@ -1,5 +1,5 @@
 use kestrelc::error::{KestrelcError, KestrelcWarning};
-use kestrelc::{cache, codegen, format_diagnostic, fusion, inline, lexer, parser, profile, purity, resolve, typecheck, wasm_codegen};
+use kestrelc::{cache, codegen, cse, format_diagnostic, fusion, inline, lexer, parser, profile, purity, resolve, typecheck, wasm_codegen};
 
 use std::fs;
 use std::path::Path;
@@ -172,6 +172,7 @@ fn main() -> ExitCode {
     }
 
     let program = fusion::fuse_loops(&program);
+    let program = cse::eliminate_common_calls(&program);
 
     if wasm {
         let bytes = match wasm_codegen::compile_to_wasm(&program) {

@@ -1,4 +1,5 @@
 pub mod ast;
+pub mod cse;
 pub mod error;
 pub mod fusion;
 pub mod interner;
@@ -104,6 +105,7 @@ pub fn compile_to_wasm_bytes(src: &str) -> Result<Vec<u8>, String> {
     }
 
     let program = fusion::fuse_loops(&program);
+    let program = cse::eliminate_common_calls(&program);
     wasm_codegen::compile_to_wasm(&program).map_err(|e| {
         if e.span.line == 0 {
             e.message
