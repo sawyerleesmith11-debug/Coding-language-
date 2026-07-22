@@ -24,7 +24,7 @@
 // keeps this pass from being stricter than the rest of the compiler.
 
 use crate::ast::*;
-use crate::error::{ErrorKind, KestrelcError};
+use crate::error::{ErrorKind, KestrelcError, KestrelcWarning};
 use crate::interner::Symbol;
 use crate::span::Span;
 use std::collections::{HashMap, HashSet};
@@ -64,6 +64,106 @@ pub fn resolve(
         resolve_fn(fn_, fns, structs, &mut errors);
     }
     errors
+}
+
+/// A separate, additive pass from `resolve` above -- deliberately not
+/// woven into `resolve_expr`'s existing walk, so `resolve`'s signature
+/// (and its 3 existing call sites in main.rs/lib.rs/watch.rs) never has
+/// to change to plumb a second output through. Costs one extra AST walk
+/// per compile, which is negligible (this compiler already does several
+/// separate full-program walks -- resolve/purity/typecheck are each
+/// their own pass over the same `Program`) and keeps this feature purely
+/// additive: a caller that doesn't call this function sees no behavior
+/// change at all.
+///
+/// Flags every array literal larger than `WARN_THRESHOLD_ELEMENTS` but
+/// at or under `resolve_expr`'s existing hard 100MB reject -- the range
+/// where a literal is legal and will compile, but is large enough that
+/// it's plausibly a mistake (a typo'd size, a debug-sized placeholder
+/// left in) worth a heads-up rather than silent acceptance.
+pub fn check_size_warnings(program: &Program) -> Vec<KestrelcWarning> {
+    let mut warnings = Vec::new();
+    for f in &program.fns {
+        walk_stmts_for_size_warnings(&f.body, &mut warnings);
+    }
+    warnings
+}
+
+fn walk_stmts_for_size_warnings(stmts: &[Stmt], warnings: &mut Vec<KestrelcWarning>) {
+    for s in stmts {
+        match s {
+            Stmt::Let { value, .. } | Stmt::Assign { value, .. } => walk_expr_for_size_warnings(value, warnings),
+            Stmt::If { cond, then_block, else_block, .. } => {
+                walk_expr_for_size_warnings(cond, warnings);
+                walk_stmts_for_size_warnings(then_block, warnings);
+                if let Some(eb) = else_block {
+                    walk_stmts_for_size_warnings(eb, warnings);
+                }
+            }
+            Stmt::While { cond, body, .. } => {
+                walk_expr_for_size_warnings(cond, warnings);
+                walk_stmts_for_size_warnings(body, warnings);
+            }
+            Stmt::Print { args, .. } => {
+                for a in args {
+                    walk_expr_for_size_warnings(a, warnings);
+                }
+            }
+            Stmt::Return { value: Some(v), .. } => walk_expr_for_size_warnings(v, warnings),
+            Stmt::Return { value: None, .. } => {}
+            Stmt::ExprStmt { expr, .. } => walk_expr_for_size_warnings(expr, warnings),
+        }
+    }
+}
+
+fn walk_expr_for_size_warnings(e: &Expr, warnings: &mut Vec<KestrelcWarning>) {
+    match &e.kind {
+        ExprKind::Num(_) | ExprKind::Str(_) | ExprKind::Bool(_) | ExprKind::Ident(_) => {}
+        ExprKind::ArrayLit(elems) => {
+            // 100,000 elements (800KB) -- well above codegen.rs's 4KB
+            // stack/heap threshold (so this range is already on the
+            // heap-allocated path, not a stack-overflow risk), but large
+            // enough that it's more likely a mistake than a genuine
+            // large literal a real program would hand-write. Below
+            // resolve_expr's existing 12,500,000-element hard reject
+            // (100MB) -- this warns in the gap between "fine" and
+            // "rejected outright."
+            const WARN_THRESHOLD_ELEMENTS: usize = 100_000;
+            if elems.len() > WARN_THRESHOLD_ELEMENTS {
+                warnings.push(KestrelcWarning::new(
+                    format!(
+                        "array literal with {} elements ({:.1}MB) is unusually large -- if this is intentional, ignore this warning",
+                        elems.len(),
+                        (elems.len() * 8) as f64 / 1_000_000.0
+                    ),
+                    e.span,
+                ));
+            }
+            for el in elems {
+                walk_expr_for_size_warnings(el, warnings);
+            }
+        }
+        ExprKind::Unary { expr, .. } => walk_expr_for_size_warnings(expr, warnings),
+        ExprKind::Binop { left, right, .. } => {
+            walk_expr_for_size_warnings(left, warnings);
+            walk_expr_for_size_warnings(right, warnings);
+        }
+        ExprKind::Index { target, index } => {
+            walk_expr_for_size_warnings(target, warnings);
+            walk_expr_for_size_warnings(index, warnings);
+        }
+        ExprKind::Call { args, .. } => {
+            for a in args {
+                walk_expr_for_size_warnings(a, warnings);
+            }
+        }
+        ExprKind::StructLit { fields, .. } => {
+            for (_, v) in fields {
+                walk_expr_for_size_warnings(v, warnings);
+            }
+        }
+        ExprKind::Field { target, .. } => walk_expr_for_size_warnings(target, warnings),
+    }
 }
 
 fn check_duplicate_fns(program: &Program, errors: &mut Vec<KestrelcError>) {
@@ -559,5 +659,35 @@ mod tests {
         );
         assert_eq!(errors.len(), 1);
         assert!(errors[0].message.contains("'Point' sets field 'x' more than once"));
+    }
+
+    fn array_literal_src(elem_count: usize) -> String {
+        let elems: Vec<String> = (0..elem_count).map(|i| (i % 1000).to_string()).collect();
+        format!("fn main() {{ let arr = [{}]; print(arr[0]); }}", elems.join(", "))
+    }
+
+    #[test]
+    fn a_small_array_literal_gets_no_size_warning() {
+        let program = parse(lex(&array_literal_src(10)).unwrap()).unwrap();
+        let warnings = check_size_warnings(&program);
+        assert!(warnings.is_empty(), "expected no warnings, got: {warnings:?}");
+    }
+
+    #[test]
+    fn an_array_literal_over_the_warn_threshold_gets_a_clear_warning() {
+        let program = parse(lex(&array_literal_src(100_001)).unwrap()).unwrap();
+        let warnings = check_size_warnings(&program);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].message.contains("100001 elements"), "got: {}", warnings[0].message);
+        assert!(warnings[0].message.contains("unusually large"), "got: {}", warnings[0].message);
+    }
+
+    #[test]
+    fn a_size_warning_never_blocks_a_program_that_otherwise_resolves_cleanly() {
+        // check_size_warnings is a separate, additive pass -- confirms
+        // it doesn't somehow feed into resolve()'s own error list.
+        let src = array_literal_src(100_001);
+        let errors = resolve_src(&src);
+        assert!(errors.is_empty(), "a large-but-under-the-hard-cap literal must still resolve with zero errors, got: {errors:?}");
     }
 }

@@ -1,4 +1,4 @@
-use kestrelc::error::KestrelcError;
+use kestrelc::error::{KestrelcError, KestrelcWarning};
 use kestrelc::{cache, codegen, format_diagnostic, fusion, inline, lexer, parser, profile, purity, resolve, typecheck, wasm_codegen};
 
 use std::fs;
@@ -29,6 +29,21 @@ fn report_many(src: &str, path: &str, errors: &[KestrelcError]) {
             eprintln!("  {}", e.message);
         } else {
             eprintln!("  {}", format_diagnostic(src, path, e.span.line, e.span.col, e.span.len.max(1), &e.message));
+        }
+    }
+}
+
+/// Prints every warning, same file:line:col + caret formatting as a
+/// real error, prefixed "warning" instead of "kestrelc:" so it reads as
+/// distinct from a build-failing message. Never affects the exit code —
+/// unlike `report_one`/`report_many`, callers don't return
+/// `ExitCode::FAILURE` after this.
+fn report_warnings(src: &str, path: &str, warnings: &[KestrelcWarning]) {
+    for w in warnings {
+        if w.span.line == 0 {
+            eprintln!("kestrelc: warning: {}", w.message);
+        } else {
+            eprintln!("kestrelc: warning: {}", format_diagnostic(src, path, w.span.line, w.span.col, w.span.len.max(1), &w.message));
         }
     }
 }
@@ -131,6 +146,7 @@ fn main() -> ExitCode {
         report_many(&src, &path, &resolve_errors);
         return ExitCode::FAILURE;
     }
+    report_warnings(&src, &path, &resolve::check_size_warnings(&program));
 
     let purity_errors = purity::check_purity(&program, &fns);
     if !purity_errors.is_empty() {

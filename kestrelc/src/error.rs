@@ -61,3 +61,25 @@ impl KestrelcError {
         KestrelcError { kind, message, span: Span::new(0, 0, 0) }
     }
 }
+
+/// A non-fatal diagnostic: printed, but never a reason to fail the
+/// build or change an exit code, unlike every `KestrelcError`. A
+/// deliberately separate type rather than a `severity` field on
+/// `KestrelcError` — every existing call site across the compiler
+/// already treats "a non-empty `Vec<KestrelcError>`" as "the build
+/// failed" (`.is_empty()` checks, early returns); folding warnings into
+/// that same type would mean auditing every one of those sites to make
+/// sure a warning-only result doesn't accidentally trip them. No `kind`
+/// enum yet (unlike `ErrorKind`) — only one warning exists so far (see
+/// `resolve::check_size_warnings`); add one if/when a second kind does.
+#[derive(Debug, Clone)]
+pub struct KestrelcWarning {
+    pub message: String,
+    pub span: Span,
+}
+
+impl KestrelcWarning {
+    pub fn new(message: String, span: Span) -> Self {
+        KestrelcWarning { message, span }
+    }
+}
