@@ -145,6 +145,13 @@ fn run_via_jit(program: &kestrelc::ast::Program) -> RunResult {
 }
 
 fn run_via_aot(src: &str) -> RunResult {
+    // Keyed by this server process's own id, not per-request -- every
+    // AOT-path /run call during one server run reuses (and overwrites)
+    // the same directory, so this doesn't grow unbounded across
+    // requests. It's never removed when the server exits, though (a
+    // minor, known gap: one leftover temp directory per server run,
+    // not per compile) -- not worth the added complexity of an atexit-
+    // style cleanup for a local dev tool's own scratch files.
     let dir = std::env::temp_dir().join(format!("kestrelc_devtool_{}", std::process::id()));
     let _ = std::fs::create_dir_all(&dir);
     let src_path = dir.join("prog.kes");
