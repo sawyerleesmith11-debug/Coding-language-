@@ -2374,14 +2374,16 @@ fn wasm_backend_nested_range_for_uses_separate_scratch_locals_correctly() {
     // (see wasm_codegen.rs's count_range_fors/range_for_end_locals) -- an
     // inner range-for's `end` value must not clobber the outer range-for's
     // own `end` value if they shared one scratch local instead of one each.
+    // Uses asymmetric bounds (outer 0-2, inner 0-4) so a shared-local bug
+    // would produce wrong iteration counts (not 2*4=8).
     let scratch = scratch_dir("wasm_nested_range_for");
     let src_path = scratch.join("prog.kes");
     fs::write(
         &src_path,
         "fn main() {\n\
          \x20   let total = 0;\n\
-         \x20   for i from 0 to 3 {\n\
-         \x20       for j from 0 to 3 {\n\
+         \x20   for i from 0 to 2 {\n\
+         \x20       for j from 0 to 4 {\n\
          \x20           total = total + 1;\n\
          \x20       }\n\
          \x20   }\n\
@@ -2401,7 +2403,7 @@ fn wasm_backend_nested_range_for_uses_separate_scratch_locals_correctly() {
     let wasm_path = scratch.join("prog.wasm");
     let run = run_wasm_via_node(&wasm_path);
     assert!(run.status.success(), "node failed to run the wasm module:\n{}", String::from_utf8_lossy(&run.stderr));
-    assert_eq!(String::from_utf8_lossy(&run.stdout), "9\n");
+    assert_eq!(String::from_utf8_lossy(&run.stdout), "8\n");
 }
 
 #[test]
