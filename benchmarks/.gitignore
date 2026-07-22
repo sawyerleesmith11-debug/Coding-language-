@@ -1,4 +1,5 @@
 *.exe
 *.o
+*.pdb
 bench
 kestrelc_runtime.c

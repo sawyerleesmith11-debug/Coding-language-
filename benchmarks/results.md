@@ -1,47 +1,61 @@
-# Kestrel vs. C benchmark results
+# Kestrel vs. C vs. Rust benchmark results
 
-Run on: Windows, mingw `cc` (WinLibs UCRT), 16 logical cores. Median of 5
-timed runs per variant, native builds only. See `2026-07-20-benchmark-suite-design.md`
-in `docs/superpowers/specs/` for methodology.
+Run on: Windows, mingw `cc` (WinLibs UCRT) + `rustc -C opt-level=3`, 16
+logical cores. Median of 5 timed runs per variant, native builds only.
+See `2026-07-20-benchmark-suite-design.md` in `docs/superpowers/specs/`
+for methodology. Rust variants (`bench.rs`) added later than the
+original C-only suite — same workloads, byte-identical input data
+(same 20,000-element array literal), output cross-checked equal across
+all four variants (kestrel/C-O2/C-O3/rust) on every run, not just
+compared after the fact.
 
-| Workload | Kestrel | C -O2 | C -O3 -march=native | Kestrel ÷ C-O3 |
-|---|---|---|---|---|
-| integer-loop | 0.659s | 0.447s | 0.446s | **1.48x slower** |
-| fib-recursive | 0.025s | 0.072s | 0.068s | **2.7x faster*** |
-| array-sum | 0.167s | 0.163s | 0.158s | **1.06x slower** (near parity) |
-| parallel-map | 0.077s | 0.354s | 0.350s | **4.5x faster** |
-| bounds-heavy | 0.637s | 0.557s | 0.548s | **1.16x slower** |
+| Workload | Kestrel | C -O2 | C -O3 -march=native | Rust -O3 | Kestrel ÷ C-O3 | Kestrel ÷ Rust |
+|---|---|---|---|---|---|---|
+| integer-loop | 0.751s | 0.511s | 0.512s | 0.632s | **1.47x slower** | **1.19x slower** |
+| fib-recursive | 0.040s | 0.098s | 0.093s | 0.132s | **2.3x faster*** | **3.3x faster*** |
+| array-sum | 0.192s | 0.182s | 0.177s | 0.177s | **1.08x slower** (near parity) | **1.08x slower** (near parity) |
+| parallel-map | 0.095s | 0.394s | 0.392s | 0.426s | **4.1x faster** | **4.5x faster** |
+| bounds-heavy | 0.657s | 0.607s | 0.609s | 0.623s | **1.08x slower** | **1.05x slower** |
 
 \* fib-recursive's win is from automatic memoization eliminating naive
-recursion's redundant subcalls, not from better codegen — C's naive
-recursion has no equivalent optimization available. Not an
-apples-to-apples codegen comparison; recorded honestly, not excluded.
+recursion's redundant subcalls, not from better codegen — neither C's
+nor Rust's naive recursion has an equivalent optimization available.
+Not an apples-to-apples codegen comparison; recorded honestly, not
+excluded.
 
 ## Reading these
 
+- **Rust lands almost exactly where C -O3 does**, workload for
+  workload — both use LLVM at a comparable optimization tier, so this
+  isn't a surprise, but it's worth having measured rather than assumed
+  (an earlier conversation estimated "Kestrel-vs-Rust should track
+  Kestrel-vs-C-O3" before this suite existed; the real numbers confirm
+  that estimate was directionally correct, within a few percent).
 - **On raw scalar codegen** (integer-loop, array-sum, bounds-heavy):
-  Cranelift lands within roughly 6-48% of C `-O3`, closest when the
-  workload doesn't autovectorize well on either side (array-sum, whose
-  modulus reduction likely blocks vectorization in both compilers) and
-  furthest on tight integer-only arithmetic (integer-loop). This is a
-  real, moderate gap — not the >100% blowout a "Cranelift can't do
-  vectorization" story alone would predict, since none of these three
-  workloads triggered heavy vectorization on the C side either. A
-  workload specifically designed to trigger SIMD (contiguous float
-  arrays, unconditional element-wise ops with no modulus) would be a
-  fairer test of Cranelift's actual vectorization gap and is a natural
-  next addition to this suite.
-- **On the actual thesis** (parallel-map): a clean **4.5x** win over
-  single-threaded C, using purity-proven auto-parallelism with zero
-  threading code written by hand. This is the strongest, most honest
-  "beats C" result in the suite — it's not a codegen-quality claim, it's
-  a language-semantics one, and the numbers back it.
+  Cranelift lands within roughly 5-47% of both C `-O3` and Rust,
+  closest when the workload doesn't autovectorize well on either side
+  (array-sum, whose modulus reduction likely blocks vectorization in
+  all three compilers) and furthest on tight integer-only arithmetic
+  (integer-loop). This is a real, moderate gap — not the >100% blowout
+  a "Cranelift can't do vectorization" story alone would predict, since
+  none of these three workloads triggered heavy vectorization on the
+  C/Rust side either. A workload specifically designed to trigger SIMD
+  (contiguous float arrays, unconditional element-wise ops with no
+  modulus) would be a fairer test of Cranelift's actual vectorization
+  gap and is a natural next addition to this suite.
+- **On the actual thesis** (parallel-map): a clean **4.1-4.5x** win over
+  single-threaded C *and* Rust, using purity-proven auto-parallelism
+  with zero threading code written by hand — the Rust variant here is
+  the same serial, single-threaded loop the C one is, not a `rayon`
+  comparison. This is the strongest, most honest "beats C/Rust" result
+  in the suite — it's not a codegen-quality claim, it's a
+  language-semantics one, and the numbers back it against both.
 - **bounds-heavy** shows the real, current cost of Kestrel's safety net
   for the dominant real-world array-access pattern (loop-indexed, not
-  literal-indexed) — about 16% overhead versus C's raw unchecked access.
-  See the finding below: the `where`-clause proof system doesn't yet
-  cover this pattern at all, so every loop-indexed access pays a real
-  runtime check today.
+  literal-indexed) — about 5-8% overhead versus C/Rust's raw unchecked
+  access. See the finding below: the `where`-clause proof system
+  doesn't yet cover this pattern at all, so every loop-indexed access
+  pays a real runtime check today.
 
 ## Two real bugs found while building this suite
 
@@ -97,5 +111,6 @@ with a clear compile error instead of an opaque runtime crash.
 ## Files
 
 - `run.sh` — rebuilds and times all 5 workloads, verifies output
-  matches across all three variants, prints median-of-5 results.
-- `<workload>/bench.kes` + `bench.c` — the workload pair.
+  matches across all four variants, prints median-of-5 results.
+- `<workload>/bench.kes` + `bench.c` + `bench.rs` — the workload set,
+  same logic and same input data in all three languages.
