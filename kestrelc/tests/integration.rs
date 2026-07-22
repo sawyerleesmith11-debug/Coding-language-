@@ -2336,6 +2336,39 @@ fn range_for_sums_an_array_correctly() {
 }
 
 #[test]
+fn wasm_backend_range_for_sums_an_array_correctly() {
+    // Mirrors range_for_sums_an_array_correctly (codegen.rs's native
+    // path) -- same program, WASM backend instead.
+    let scratch = scratch_dir("wasm_range_for_sum");
+    let src_path = scratch.join("prog.kes");
+    fs::write(
+        &src_path,
+        "fn main() {\n\
+         \x20   let arr = [10, 20, 30, 40, 50];\n\
+         \x20   let total = 0;\n\
+         \x20   for i from 0 to 5 {\n\
+         \x20       total = total + arr[i];\n\
+         \x20   }\n\
+         \x20   print(total);\n\
+         }\n",
+    )
+    .unwrap();
+
+    let out = Command::new(kestrelc_bin())
+        .arg("--wasm")
+        .arg(&src_path)
+        .current_dir(&scratch)
+        .output()
+        .expect("failed to run kestrelc");
+    assert!(out.status.success(), "kestrelc --wasm failed:\n{}", String::from_utf8_lossy(&out.stderr));
+
+    let wasm_path = scratch.join("prog.wasm");
+    let run = run_wasm_via_node(&wasm_path);
+    assert!(run.status.success(), "node failed to run the wasm module:\n{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout), "150\n");
+}
+
+#[test]
 fn range_for_with_start_equal_to_end_runs_zero_times() {
     let scratch = scratch_dir("range_for_zero");
     let src_path = scratch.join("prog.kes");

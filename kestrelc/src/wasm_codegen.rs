@@ -242,6 +242,10 @@ fn walk_slots(
                 }
             }
             Stmt::While { body, .. } => walk_slots(body, slots, seen, known_lens),
+            Stmt::RangeFor { var, body, .. } => {
+                add_slot(*var, SlotKind::Scalar, slots, seen);
+                walk_slots(body, slots, seen, known_lens);
+            }
             _ => {}
         }
     }
@@ -256,6 +260,33 @@ fn collect_slots(f: &Fn, struct_table: &HashMap<Symbol, &StructDecl>) -> Vec<(Sy
     }
     walk_slots(&f.body, &mut slots, &mut seen, &mut known_lens);
     slots
+}
+
+/// One scratch i64 local per `RangeFor` occurrence in `stmts` (recursing
+/// into every nested block) -- `end` is evaluated once per range-for and
+/// must survive across the loop's whole body, so unlike this file's other
+/// single shared scratch local, a nested range-for needs its own slot or
+/// an outer loop's `end` value would be clobbered by an inner one reusing
+/// the same local.
+fn count_range_fors(stmts: &[Stmt]) -> usize {
+    let mut count = 0;
+    for s in stmts {
+        match s {
+            Stmt::If { then_block, else_block, .. } => {
+                count += count_range_fors(then_block);
+                if let Some(eb) = else_block {
+                    count += count_range_fors(eb);
+                }
+            }
+            Stmt::While { body, .. } => count += count_range_fors(body),
+            Stmt::RangeFor { body, .. } => {
+                count += 1;
+                count += count_range_fors(body);
+            }
+            _ => {}
+        }
+    }
+    count
 }
 
 fn gen_fn(
@@ -322,6 +353,15 @@ fn gen_fn(
     let scratch = next_local;
     extra_locals.push((1, ValType::I32));
 
+    let range_for_end_locals: Vec<u32> = (0..count_range_fors(&f.body))
+        .map(|_| {
+            let idx = next_local;
+            next_local += 1;
+            extra_locals.push((1, ValType::I64));
+            idx
+        })
+        .collect();
+
     let mut func = Function::new(extra_locals);
     let mut fc = FnWasm {
         func: &mut func,
@@ -333,6 +373,8 @@ fn gen_fn(
         data_bytes,
         str_offsets,
         scratch,
+        range_for_end_locals,
+        range_for_cursor: 0,
         cur_span: f.span,
     };
     fc.gen_block(&f.body)?;
@@ -358,6 +400,8 @@ struct FnWasm<'a> {
     data_bytes: &'a mut Vec<u8>,
     str_offsets: &'a mut HashMap<String, (u32, u32)>,
     scratch: u32,
+    range_for_end_locals: Vec<u32>,
+    range_for_cursor: usize,
     /// The span of the statement `gen_stmt` is currently generating code
     /// for — see codegen.rs's identical `cur_span` field/`err()` method
     /// for the full rationale. Closes the gap left by native codegen
@@ -526,6 +570,7 @@ impl<'a> FnWasm<'a> {
             | Stmt::Assign { span, .. }
             | Stmt::If { span, .. }
             | Stmt::While { span, .. }
+            | Stmt::RangeFor { span, .. }
             | Stmt::Print { span, .. }
             | Stmt::Return { span, .. }
             | Stmt::ExprStmt { span, .. } => *span,
@@ -558,6 +603,43 @@ impl<'a> FnWasm<'a> {
                 self.func.instructions().br_if(1); // condition false -> break out of the block
                 self.gen_block(body)?;
                 self.func.instructions().br(0); // loop back
+                self.func.instructions().end(); // end loop
+                self.func.instructions().end(); // end block
+                Ok(())
+            }
+            Stmt::RangeFor { var, start, end, body, .. } => {
+                self.gen_binding(*var, start)?; // var = start
+
+                // Evaluate `end` exactly once and stash it in this
+                // occurrence's own scratch local -- see this task's
+                // design note for why a shared scratch local is unsafe
+                // for nested range-for loops.
+                let end_local = self.range_for_end_locals[self.range_for_cursor];
+                self.range_for_cursor += 1;
+                self.gen_expr(end)?;
+                self.func.instructions().local_set(end_local);
+
+                self.func.instructions().block(wasm_encoder::BlockType::Empty);
+                self.func.instructions().loop_(wasm_encoder::BlockType::Empty);
+
+                let VarLoc::Scalar(var_local) = self.vars[var] else {
+                    return Err(self.err(format!(
+                        "internal error: range-for loop variable '{var}' wasn't declared as a scalar slot"
+                    )));
+                };
+                self.func.instructions().local_get(var_local);
+                self.func.instructions().local_get(end_local);
+                self.func.instructions().i64_ge_s(); // var >= end -> exit
+                self.func.instructions().br_if(1);
+
+                self.gen_block(body)?;
+
+                self.func.instructions().local_get(var_local);
+                self.func.instructions().i64_const(1);
+                self.func.instructions().i64_add();
+                self.func.instructions().local_set(var_local);
+                self.func.instructions().br(0);
+
                 self.func.instructions().end(); // end loop
                 self.func.instructions().end(); // end block
                 Ok(())
