@@ -49,19 +49,91 @@ typedef struct {
     long long (*f)(long long);
 } kestrelc_pmap_chunk;
 
-static void* kestrelc_pmap_worker(void* arg) {
-    kestrelc_pmap_chunk* c = (kestrelc_pmap_chunk*)arg;
-    for (long long i = c->start; i < c->end; i++) {
-        c->out[i] = c->f(c->in[i]);
+// Persistent worker pool. `parallel_map` used to pthread_create/join a
+// fresh batch of threads on every single call, paying OS thread-spawn
+// cost every time -- real overhead for any program that calls it more
+// than once (e.g. inside a loop). Instead: spawn `g_pool_size` workers
+// once, lazily, on the first call that actually needs threads; they
+// park on `g_pool_work_ready` between jobs and are handed a new chunk
+// assignment (via a generation counter) each call.
+//
+// Kestrel's purity model guarantees the *caller* of parallel_map is
+// always a single thread at a time (no concurrent parallel_map calls
+// racing each other), so one shared pool with no per-call allocation
+// is safe -- no need to support concurrent dispatches.
+//
+// Workers loop forever and are never joined. That's intentional: they
+// only ever block on a condvar wait, never hold a lock across process
+// exit, so when the program's own main() returns or calls exit(), the
+// OS reclaims the whole process (threads included) without any hang --
+// same reasoning already applied to why alloc failure here degrades
+// gracefully instead of crashing.
+static pthread_mutex_t g_pool_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_pool_work_ready = PTHREAD_COND_INITIALIZER;
+static pthread_cond_t g_pool_work_done = PTHREAD_COND_INITIALIZER;
+static pthread_t* g_pool_threads = NULL;
+static kestrelc_pmap_chunk* g_pool_chunks = NULL;
+static long g_pool_size = 0;
+static unsigned long g_pool_generation = 0;
+static long g_pool_pending = 0;
+static pthread_once_t g_pool_once = PTHREAD_ONCE_INIT;
+
+static void* kestrelc_pmap_pool_worker(void* arg) {
+    long idx = (long)(intptr_t)arg;
+    unsigned long seen_generation = 0;
+    for (;;) {
+        pthread_mutex_lock(&g_pool_mutex);
+        while (g_pool_generation == seen_generation) {
+            pthread_cond_wait(&g_pool_work_ready, &g_pool_mutex);
+        }
+        seen_generation = g_pool_generation;
+        kestrelc_pmap_chunk c = g_pool_chunks[idx];
+        pthread_mutex_unlock(&g_pool_mutex);
+
+        for (long long i = c.start; i < c.end; i++) {
+            c.out[i] = c.f(c.in[i]);
+        }
+
+        pthread_mutex_lock(&g_pool_mutex);
+        g_pool_pending--;
+        if (g_pool_pending == 0) {
+            pthread_cond_signal(&g_pool_work_done);
+        }
+        pthread_mutex_unlock(&g_pool_mutex);
     }
     return NULL;
 }
 
+// Runs once via pthread_once. On allocation failure, leaves
+// g_pool_threads NULL -- the dispatch below treats that the same as
+// "pool unavailable" and falls back to running inline, matching this
+// file's existing "never crash on OOM in a performance path" posture.
+static void kestrelc_pool_init(void) {
+    long nprocs = kestrelc_nprocs();
+    if (nprocs < 1) {
+        nprocs = 1;
+    }
+    g_pool_size = nprocs;
+    g_pool_threads = malloc(sizeof(pthread_t) * (size_t)g_pool_size);
+    g_pool_chunks = malloc(sizeof(kestrelc_pmap_chunk) * (size_t)g_pool_size);
+    if (!g_pool_threads || !g_pool_chunks) {
+        free(g_pool_threads);
+        free(g_pool_chunks);
+        g_pool_threads = NULL;
+        g_pool_chunks = NULL;
+        g_pool_size = 0;
+        return;
+    }
+    for (long t = 0; t < g_pool_size; t++) {
+        pthread_create(&g_pool_threads[t], NULL, kestrelc_pmap_pool_worker, (void*)(intptr_t)t);
+    }
+}
+
 // Called by kestrelc-generated code for `parallel_map(f, arr)`: writes
 // `f(in[i])` into `out[i]` for every `i` in `[0, len)`. Below a fixed
-// size threshold (thread setup/teardown would cost more than it saves)
-// or on a single-core machine, runs inline on the calling thread instead
-// — a real, if simple, heuristic for "is splitting this actually worth
+// size threshold (thread hand-off would cost more than it saves) or on
+// a single-core machine, runs inline on the calling thread instead —
+// a real, if simple, heuristic for "is splitting this actually worth
 // it," which is exactly the trade-off kestrel-DESIGN.md's idea #5 names
 // as real additional engineering, not a free unlock.
 void kestrelc_parallel_map_i64(const long long* in, long long len, long long (*f)(long long), long long* out) {
@@ -69,7 +141,9 @@ void kestrelc_parallel_map_i64(const long long* in, long long len, long long (*f
         return;
     }
 
-    long nprocs = kestrelc_nprocs();
+    pthread_once(&g_pool_once, kestrelc_pool_init);
+
+    long nprocs = g_pool_size;
     if (nprocs < 1) {
         nprocs = 1;
     }
@@ -77,44 +151,50 @@ void kestrelc_parallel_map_i64(const long long* in, long long len, long long (*f
         nprocs = len;
     }
 
-    if (len < 10000 || nprocs <= 1) {
+    if (len < 10000 || nprocs <= 1 || g_pool_threads == NULL) {
         for (long long i = 0; i < len; i++) {
             out[i] = f(in[i]);
         }
         return;
     }
 
-    pthread_t* threads = malloc(sizeof(pthread_t) * (size_t)nprocs);
-    kestrelc_pmap_chunk* chunks = malloc(sizeof(kestrelc_pmap_chunk) * (size_t)nprocs);
-    if (!threads || !chunks) {
-        // Allocation failure: fall back to running inline rather than
-        // crashing — this is a performance path, never a correctness one.
-        free(threads);
-        free(chunks);
-        for (long long i = 0; i < len; i++) {
-            out[i] = f(in[i]);
-        }
-        return;
-    }
+    pthread_mutex_lock(&g_pool_mutex);
 
     long long chunk_size = len / nprocs;
     long long start = 0;
-    for (long t = 0; t < nprocs; t++) {
-        long long end = (t == nprocs - 1) ? len : start + chunk_size;
-        chunks[t].in = in;
-        chunks[t].out = out;
-        chunks[t].start = start;
-        chunks[t].end = end;
-        chunks[t].f = f;
-        pthread_create(&threads[t], NULL, kestrelc_pmap_worker, &chunks[t]);
-        start = end;
-    }
-    for (long t = 0; t < nprocs; t++) {
-        pthread_join(threads[t], NULL);
+    for (long t = 0; t < g_pool_size; t++) {
+        if (t < nprocs) {
+            long long end = (t == nprocs - 1) ? len : start + chunk_size;
+            g_pool_chunks[t].in = in;
+            g_pool_chunks[t].out = out;
+            g_pool_chunks[t].start = start;
+            g_pool_chunks[t].end = end;
+            g_pool_chunks[t].f = f;
+            start = end;
+        } else {
+            // Pool is sized to this machine's core count, which never
+            // shrinks between calls -- but `nprocs` above is also
+            // capped by `len`, so a small-array call can leave trailing
+            // pool workers with nothing to do this round. Give them an
+            // empty, no-op range rather than skipping their dispatch,
+            // so every worker always participates in the same
+            // generation/pending handshake.
+            g_pool_chunks[t].in = NULL;
+            g_pool_chunks[t].out = NULL;
+            g_pool_chunks[t].start = 0;
+            g_pool_chunks[t].end = 0;
+            g_pool_chunks[t].f = NULL;
+        }
     }
 
-    free(threads);
-    free(chunks);
+    g_pool_pending = g_pool_size;
+    g_pool_generation++;
+    pthread_cond_broadcast(&g_pool_work_ready);
+    while (g_pool_pending != 0) {
+        pthread_cond_wait(&g_pool_work_done, &g_pool_mutex);
+    }
+
+    pthread_mutex_unlock(&g_pool_mutex);
 }
 
 // Called by kestrelc-generated code for an *unprovable* array access
