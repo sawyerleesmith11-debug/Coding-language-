@@ -28,9 +28,7 @@
 // sysconf(_SC_NPROCESSORS_ONLN) is a POSIX/glibc extension MinGW-w64's
 // UCRT doesn't implement — Windows' own answer to "how many logical
 // processors" is GetSystemInfo. Both return the same kind of number
-// (logical processor count, no P-core/E-core distinction), so the
-// len<10000-or-single-core fallback heuristic below behaves identically
-// either way.
+// (logical processor count, no P-core/E-core distinction).
 static long kestrelc_nprocs(void) {
 #ifdef _WIN32
     SYSTEM_INFO info;
@@ -38,6 +36,54 @@ static long kestrelc_nprocs(void) {
     return (long)info.dwNumberOfProcessors;
 #else
     return sysconf(_SC_NPROCESSORS_ONLN);
+#endif
+}
+
+// Physical core count, distinct from kestrelc_nprocs()'s logical
+// (SMT/hyperthreaded) count. Used to size the parallel_map worker pool
+// -- two threads sharing one physical core's execution units mostly adds
+// scheduling contention for the ALU-bound integer work parallel_map
+// callbacks typically do, rather than adding real throughput.
+//
+// Windows: GetLogicalProcessorInformation returns one entry per logical
+// processor grouping; entries with Relationship == RelationProcessorCore
+// are physical cores (their ProcessorMask covers every sibling logical
+// processor on that core, but we only need the count of such entries,
+// not the mask itself). On any failure (old OS, buffer-size races),
+// falls back to the logical count rather than guessing a wrong number.
+//
+// Linux/other POSIX: no equivalent implemented here -- accurately
+// determining physical core count on Linux means parsing
+// /proc/cpuinfo's "core id"/"physical id" fields or using a topology
+// API, real platform-specific work with no way to test or verify it
+// from this Windows dev machine. Falls back to the logical count
+// (kestrelc_nprocs()) rather than shipping an unverified Linux path.
+static long kestrelc_nprocs_physical(void) {
+#ifdef _WIN32
+    DWORD len = 0;
+    GetLogicalProcessorInformation(NULL, &len);
+    if (len == 0) {
+        return kestrelc_nprocs();
+    }
+    SYSTEM_LOGICAL_PROCESSOR_INFORMATION* buf = malloc(len);
+    if (!buf) {
+        return kestrelc_nprocs();
+    }
+    if (!GetLogicalProcessorInformation(buf, &len)) {
+        free(buf);
+        return kestrelc_nprocs();
+    }
+    long physical = 0;
+    DWORD count = len / sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION);
+    for (DWORD i = 0; i < count; i++) {
+        if (buf[i].Relationship == RelationProcessorCore) {
+            physical++;
+        }
+    }
+    free(buf);
+    return physical > 0 ? physical : kestrelc_nprocs();
+#else
+    return kestrelc_nprocs();
 #endif
 }
 
@@ -109,7 +155,7 @@ static void* kestrelc_pmap_pool_worker(void* arg) {
 // "pool unavailable" and falls back to running inline, matching this
 // file's existing "never crash on OOM in a performance path" posture.
 static void kestrelc_pool_init(void) {
-    long nprocs = kestrelc_nprocs();
+    long nprocs = kestrelc_nprocs_physical();
     if (nprocs < 1) {
         nprocs = 1;
     }
