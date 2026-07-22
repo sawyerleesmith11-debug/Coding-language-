@@ -5,9 +5,9 @@
 // describes: it skips *redundant recompilation* of source that hasn't
 // changed since it last compiled successfully (keyed by a hash of the
 // source text), not runtime branch/shape profiling. Real, honest, and
-// immediately useful for the common case of running `kestrelc` (or the
-// editor's native engine) repeatedly on the same file during a dev
-// loop — see cache::dir()'s doc comment for exactly where entries live.
+// immediately useful for the common case of running `kestrelc`
+// repeatedly on the same file during a dev loop — see cache::dir()'s
+// doc comment for exactly where entries live.
 //
 // Only used by the native CLI (filesystem-backed).
 

@@ -63,29 +63,26 @@ compiles a subset of the language straight to a real executable and is
 **~50-175x faster than `runFast`**, landing within a few multiples of
 hand-written Rust/C++ on its first working version — see
 `kestrelc/README.md` for its exact scope and `kestrel-DESIGN.md` for the
-full benchmark writeup and methodology. And `kestrelc` itself now also
-compiles to WASM (both as a `kestrelc --wasm` output target, and as
-`kestrelc-web` — the compiler itself running in the browser) so that
-same near-native speed is available directly in `kestrel-editor.html`,
-no server or native binary required — pick "engine: native (wasm)", now
-with array support there too. `kestrelc` also has a persistent,
+full benchmark writeup and methodology. (An earlier WASM backend and
+browser playground — `kestrelc-web` + `kestrel-editor.html` — have
+since been removed; see `kestrelc-devtool/` for the current native dev
+tool.) `kestrelc` also has a persistent,
 cross-invocation compile cache now (skips redundant recompilation of
 unchanged source — see `kestrelc/README.md`), though not yet the fuller
 runtime-profile-guided version `kestrel-DESIGN.md` describes. And
 `parallel_map(f, arr)` now gives `pure fn`s real multi-threaded
 execution in `kestrelc`'s native backend — ~2.1x faster than sequential
 on this machine, purity alone as the safety proof, no `unsafe` — while
-every other backend (`run`, `runFast`, and the WASM backend) accepts
-the same programs and runs them sequentially, correctly, just not in
-parallel. There's now also a first, honestly-scoped **type checker**
+every other backend (`run` and `runFast`) accepts the same programs and
+runs them sequentially, correctly, just not in parallel. There's now
+also a first, honestly-scoped **type checker**
 (every backend) — catches `5 + true`, `if (5) {...}`, and function
 calls with the wrong argument count at compile time, though it doesn't
 yet check declared parameter type names against call-site arguments;
 see `docs/SYNTAX.md`'s "Type checking" section. Compile errors now
 include line, column, and a length too, not just a line number —
-`kestrelc`'s CLI/WASM output and lex/parse errors surfaced through
-`kestrel-editor.html` print `file:line:col: message` with a `^` under
-the offending span. Purity-check and type-check errors (JS backends)
+`kestrelc`'s CLI output prints `file:line:col: message` with a `^`
+under the offending span. Purity-check and type-check errors (JS backends)
 get the same `file:line:col:` + caret treatment now too, pinned to the
 statement that triggered them (not the exact sub-expression yet); see
 `kestrel-DESIGN.md` for the exact scope and what's still message-only
@@ -95,7 +92,7 @@ calls are now memoized too, in both JS backends (`run` and `runFast`)
 instead of re-executing, scoped to a single run, always safe per the
 purity proof. `kestrelc` doesn't memoize yet — JS-backends-first, a
 known gap. A narrow form of pure-function loop fusion is also in now,
-**in every backend including `kestrelc`** (native and `--wasm`): a
+**in every backend including `kestrelc`**: a
 chain of `parallel_map` calls where each one's array comes straight
 from the previous one's result fuses into a single pass with a
 synthesized function, instead of materializing an intermediate array

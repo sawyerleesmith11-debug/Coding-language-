@@ -220,7 +220,7 @@ argument — is a compile error in every backend, checked unconditionally
 Purity is what makes this safe to run in any order, or concurrently:
 a `pure fn` can't observe or be affected by any other call to itself,
 so there's nothing for two calls to race over. `run`/`runFast` (single-
-threaded JS) and the WASM backend apply `f` sequentially; `kestrelc`'s
+threaded JS) apply `f` sequentially; `kestrelc`'s
 native backend is the only one that actually parallelizes it across
 real OS threads (above a size threshold — see `kestrelc/README.md`). See
 `kestrel-DESIGN.md` idea #5 for the full design rationale and current

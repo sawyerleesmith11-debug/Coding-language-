@@ -9,6 +9,12 @@ draft, not a spec — some of these ideas are standard practice (borrow
 checking, AOT compilation), and some are original combinations/extensions
 that haven't been tried together in one language. Both are marked below.
 
+**Note:** the WASM backend, `kestrelc-web`, and `kestrel-editor.html`
+described throughout this document have since been removed (superseded
+by `kestrelc-devtool/`, a native dev tool with no WASM dependency).
+Sections below discussing them are kept as historical design record,
+not a description of current functionality.
+
 ---
 
 ## 1. Persistent cross-run optimization cache
