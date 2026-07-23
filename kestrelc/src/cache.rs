@@ -24,7 +24,7 @@ use std::path::PathBuf;
 /// v2: the native artifact cache key changed shape (see `artifact_key`)
 /// to fold in a profile fingerprint — bumped so no v1 entry is ever
 /// misread as a v2 one keyed on a coincidentally-matching hash.
-const CACHE_FORMAT_VERSION: &str = "v3";
+const CACHE_FORMAT_VERSION: &str = "v4";
 
 /// Where cache entries live: `$KESTRELC_CACHE_DIR` if set, else
 /// `$XDG_CACHE_HOME/kestrelc`, else `$HOME/.cache/kestrelc`, else

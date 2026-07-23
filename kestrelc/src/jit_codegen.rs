@@ -41,7 +41,7 @@ use crate::ast::*;
 use crate::error::{ErrorKind, KestrelcError};
 use crate::interner::Symbol;
 use crate::span::Span;
-use cranelift_codegen::ir::{condcodes::IntCC, types, AbiParam, Function, InstBuilder, Signature, TrapCode, UserFuncName, Value};
+use cranelift_codegen::ir::{condcodes::IntCC, types, AbiParam, Block, Function, InstBuilder, Signature, TrapCode, UserFuncName, Value};
 use cranelift_codegen::isa::CallConv;
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_codegen::Context;
@@ -273,6 +273,7 @@ fn check_stmts_supported(stmts: &[Stmt]) -> Result<(), KestrelcError> {
             }
             Stmt::Return { value: Some(v), .. } => check_expr_supported(v, false)?,
             Stmt::Return { value: None, .. } => {}
+            Stmt::Break { .. } | Stmt::Continue { .. } => {}
             Stmt::ExprStmt { expr, .. } => check_expr_supported(expr, false)?,
         }
     }
@@ -517,6 +518,7 @@ impl JitCodegen {
                 str_cache: &mut self.str_cache,
                 str_counter: &mut self.str_counter,
                 cur_span: f.span,
+                loop_stack: Vec::new(),
             };
             fc.gen_frame_enter_guard()?;
             let terminated = fc.gen_block(&f.body)?;
@@ -636,6 +638,10 @@ struct FnCodegen<'a> {
     str_cache: &'a mut HashMap<String, StrConst>,
     str_counter: &'a mut usize,
     cur_span: Span,
+    /// Same design as codegen.rs's identically-named field -- one entry
+    /// per active enclosing loop, innermost last, `(continue_target,
+    /// break_target)`.
+    loop_stack: Vec<(Block, Block)>,
 }
 
 impl<'a> FnCodegen<'a> {
@@ -662,6 +668,8 @@ impl<'a> FnCodegen<'a> {
             | Stmt::RangeFor { span, .. }
             | Stmt::Print { span, .. }
             | Stmt::Return { span, .. }
+            | Stmt::Break { span, .. }
+            | Stmt::Continue { span, .. }
             | Stmt::ExprStmt { span, .. } => *span,
         };
         match s {
@@ -724,7 +732,9 @@ impl<'a> FnCodegen<'a> {
                 self.builder.ins().brif(c, body_blk, &[], after_blk, &[]);
 
                 self.builder.switch_to_block(body_blk);
+                self.loop_stack.push((header_blk, after_blk));
                 let body_term = self.gen_block(body)?;
+                self.loop_stack.pop();
                 if !body_term {
                     self.builder.ins().jump(header_blk, &[]);
                 }
@@ -744,6 +754,7 @@ impl<'a> FnCodegen<'a> {
 
                 let header_blk = self.builder.create_block();
                 let body_blk = self.builder.create_block();
+                let increment_blk = self.builder.create_block();
                 let after_blk = self.builder.create_block();
 
                 self.builder.ins().jump(header_blk, &[]);
@@ -754,19 +765,39 @@ impl<'a> FnCodegen<'a> {
                 self.builder.ins().brif(c, body_blk, &[], after_blk, &[]);
 
                 self.builder.switch_to_block(body_blk);
+                self.loop_stack.push((increment_blk, after_blk));
                 let body_term = self.gen_block(body)?;
+                self.loop_stack.pop();
                 if !body_term {
-                    let cur = self.builder.use_var(var_v);
-                    let next = self.builder.ins().iadd_imm(cur, 1);
-                    self.builder.def_var(var_v, next);
-                    self.builder.ins().jump(header_blk, &[]);
+                    self.builder.ins().jump(increment_blk, &[]);
                 }
                 self.builder.seal_block(body_blk);
+
+                self.builder.switch_to_block(increment_blk);
+                let cur = self.builder.use_var(var_v);
+                let next = self.builder.ins().iadd_imm(cur, 1);
+                self.builder.def_var(var_v, next);
+                self.builder.ins().jump(header_blk, &[]);
+                self.builder.seal_block(increment_blk);
                 self.builder.seal_block(header_blk);
 
                 self.builder.switch_to_block(after_blk);
                 self.builder.seal_block(after_blk);
                 Ok(false)
+            }
+            Stmt::Break { .. } => {
+                let Some(&(_, after_blk)) = self.loop_stack.last() else {
+                    return Err(self.err("internal error: 'break' reached codegen outside any loop -- resolve.rs should have rejected this".to_string()));
+                };
+                self.builder.ins().jump(after_blk, &[]);
+                Ok(true)
+            }
+            Stmt::Continue { .. } => {
+                let Some(&(continue_target, _)) = self.loop_stack.last() else {
+                    return Err(self.err("internal error: 'continue' reached codegen outside any loop -- resolve.rs should have rejected this".to_string()));
+                };
+                self.builder.ins().jump(continue_target, &[]);
+                Ok(true)
             }
             Stmt::Print { args, .. } => {
                 self.gen_print(args)?;
@@ -1354,5 +1385,100 @@ mod tests {
              }\n",
         );
         assert_eq!(result, 15);
+    }
+
+    #[test]
+    fn break_exits_a_while_loop_early_via_jit() {
+        let result = jit_run(
+            "fn main() {\n\
+             \x20   let i = 0;\n\
+             \x20   let total = 0;\n\
+             \x20   while (i < 100) {\n\
+             \x20       if (i == 5) {\n\
+             \x20           break;\n\
+             \x20       }\n\
+             \x20       total = total + i;\n\
+             \x20       i = i + 1;\n\
+             \x20   }\n\
+             \x20   return total;\n\
+             }\n",
+        );
+        assert_eq!(result, 10); // 0+1+2+3+4
+    }
+
+    #[test]
+    fn continue_skips_the_rest_of_a_while_bodys_current_iteration_via_jit() {
+        let result = jit_run(
+            "fn main() {\n\
+             \x20   let i = 0;\n\
+             \x20   let total = 0;\n\
+             \x20   while (i < 10) {\n\
+             \x20       i = i + 1;\n\
+             \x20       if (i % 2 == 0) {\n\
+             \x20           continue;\n\
+             \x20       }\n\
+             \x20       total = total + i;\n\
+             \x20   }\n\
+             \x20   return total;\n\
+             }\n",
+        );
+        assert_eq!(result, 25); // 1+3+5+7+9
+    }
+
+    #[test]
+    fn continue_still_runs_a_range_fors_implicit_step_via_jit() {
+        let result = jit_run(
+            "fn main() {\n\
+             \x20   let total = 0;\n\
+             \x20   for i from 0 to 10 {\n\
+             \x20       if (i % 2 == 0) {\n\
+             \x20           continue;\n\
+             \x20       }\n\
+             \x20       total = total + i;\n\
+             \x20   }\n\
+             \x20   return total;\n\
+             }\n",
+        );
+        assert_eq!(result, 25); // 1+3+5+7+9, proves `continue` doesn't skip the +1 step
+    }
+
+    #[test]
+    fn continue_still_runs_a_general_fors_step_via_jit() {
+        // Regression test: without inject_step_before_continues (see
+        // parser.rs), this exact program hangs forever -- `continue`
+        // would jump straight to the desugared while's condition
+        // recheck, skipping `i = i + 1` entirely, so `i` never reaches 5.
+        let result = jit_run(
+            "fn main() {\n\
+             \x20   let total = 0;\n\
+             \x20   for i = 0, i < 5, i = i + 1 {\n\
+             \x20       if (i == 2) {\n\
+             \x20           continue;\n\
+             \x20       }\n\
+             \x20       total = total + 1;\n\
+             \x20   }\n\
+             \x20   return total;\n\
+             }\n",
+        );
+        assert_eq!(result, 4); // every i except i==2
+    }
+
+    #[test]
+    fn break_in_an_inner_loop_does_not_affect_the_outer_loop_via_jit() {
+        let result = jit_run(
+            "fn main() {\n\
+             \x20   let count = 0;\n\
+             \x20   for i from 0 to 5 {\n\
+             \x20       for j from 0 to 5 {\n\
+             \x20           if (j == 2) {\n\
+             \x20               break;\n\
+             \x20           }\n\
+             \x20           count = count + 1;\n\
+             \x20       }\n\
+             \x20   }\n\
+             \x20   return count;\n\
+             }\n",
+        );
+        assert_eq!(result, 10); // 5 outer iterations * 2 inner iterations each
     }
 }

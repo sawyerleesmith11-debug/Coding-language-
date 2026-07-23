@@ -83,6 +83,7 @@ fn count_ident_refs_stmts(stmts: &[Stmt], name: Symbol, count: &mut usize) {
                     count_ident_refs_expr(v, name, count);
                 }
             }
+            Stmt::Break { .. } | Stmt::Continue { .. } => {}
             Stmt::ExprStmt { expr, .. } => count_ident_refs_expr(expr, name, count),
         }
     }

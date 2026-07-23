@@ -7,6 +7,31 @@ use crate::interner::Symbol;
 use crate::lexer::{Tok, Token};
 use crate::span::Span;
 
+/// Rewrites every `continue;` belonging to THIS loop (not a nested one)
+/// into `{ step; continue; }` in place -- see the general-for desugar's
+/// call site for why. Does not recurse into a nested `While`/`RangeFor`
+/// body: a `continue` in there belongs to that inner loop, not this
+/// one, and must be left untouched.
+fn inject_step_before_continues(stmts: &mut Vec<Stmt>, step: &Stmt) {
+    let mut i = 0;
+    while i < stmts.len() {
+        match &mut stmts[i] {
+            Stmt::Continue { .. } => {
+                stmts.insert(i, step.clone());
+                i += 1; // skip the just-inserted step, land back on the continue
+            }
+            Stmt::If { then_block, else_block, .. } => {
+                inject_step_before_continues(then_block, step);
+                if let Some(eb) = else_block {
+                    inject_step_before_continues(eb, step);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+}
+
 pub struct Parser {
     tokens: Vec<Token>,
     pos: usize,
@@ -482,8 +507,20 @@ impl Parser {
             }
             self.expect(Tok::Eq)?;
             let step_value = self.parse_expr()?;
+            let step_stmt = Stmt::Assign { name: var, value: step_value, span: step_span };
             let mut body = self.parse_block()?;
-            body.push(Stmt::Assign { name: var, value: step_value, span: step_span });
+            // A bare `continue;` inside this body would otherwise jump
+            // straight to the desugared `while`'s condition recheck,
+            // skipping the step entirely -- for a `while` loop that's
+            // correct (it has no separate step to preserve), but
+            // general-for is meant to provide C `for`-loop semantics,
+            // where `continue` still runs the step before rechecking.
+            // Rewriting every such `continue` into `{ step; continue; }`
+            // preserves that without needing a dedicated AST node or
+            // codegen support (see ast.rs's Stmt::Continue doc comment
+            // for why RangeFor needs one but general-for doesn't).
+            inject_step_before_continues(&mut body, &step_stmt);
+            body.push(step_stmt);
             return Ok(vec![
                 Stmt::Let { name: var, value: init_value, span },
                 Stmt::While { cond, body, span },
@@ -502,6 +539,16 @@ impl Parser {
             let value = if self.at(&Tok::Semi) { None } else { Some(self.parse_expr()?) };
             self.expect(Tok::Semi)?;
             return Ok(vec![Stmt::Return { value, span }]);
+        }
+        if self.at(&Tok::Break) {
+            self.advance();
+            self.expect(Tok::Semi)?;
+            return Ok(vec![Stmt::Break { span }]);
+        }
+        if self.at(&Tok::Continue) {
+            self.advance();
+            self.expect(Tok::Semi)?;
+            return Ok(vec![Stmt::Continue { span }]);
         }
         if let Tok::Ident(name) = &self.peek().tok {
             let name = name.clone();
@@ -674,6 +721,36 @@ mod tests {
         // original print(i) plus the appended step assignment
         assert_eq!(body.len(), 2);
         assert!(matches!(&body[1], Stmt::Assign { .. }));
+    }
+
+    #[test]
+    fn a_bare_continue_in_a_general_for_body_gets_the_step_injected_before_it() {
+        let program = crate::parser::parse(crate::lexer::lex(
+            "fn main() { for i = 0, i < 5, i = i + 1 { continue; } }"
+        ).unwrap()).unwrap();
+        let main_fn = &program.fns[0];
+        let Stmt::While { body, .. } = &main_fn.body[1] else { panic!("expected While") };
+        // body: [step, continue, step] -- the injected step before the
+        // user's own continue, then the loop's own trailing step (for
+        // the normal fallthrough path) still appended after.
+        assert_eq!(body.len(), 3, "got: {:?}", body);
+        assert!(matches!(&body[0], Stmt::Assign { .. }), "expected injected step before continue, got: {:?}", body[0]);
+        assert!(matches!(&body[1], Stmt::Continue { .. }));
+        assert!(matches!(&body[2], Stmt::Assign { .. }));
+    }
+
+    #[test]
+    fn a_continue_inside_a_nested_loop_does_not_get_the_outer_steps_step_injected() {
+        let program = crate::parser::parse(crate::lexer::lex(
+            "fn main() { for i = 0, i < 5, i = i + 1 { while (true) { continue; } } }"
+        ).unwrap()).unwrap();
+        let main_fn = &program.fns[0];
+        let Stmt::While { body: outer_body, .. } = &main_fn.body[1] else { panic!("expected outer While") };
+        let Stmt::While { body: inner_body, .. } = &outer_body[0] else { panic!("expected inner While") };
+        // The inner while's own continue must be untouched -- no step
+        // injected, since that continue belongs to the inner loop.
+        assert_eq!(inner_body.len(), 1, "got: {:?}", inner_body);
+        assert!(matches!(&inner_body[0], Stmt::Continue { .. }));
     }
 
     #[test]

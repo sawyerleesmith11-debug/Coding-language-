@@ -419,6 +419,7 @@ pub fn check_types(
                     }
                 }
             }
+            Stmt::Break { .. } | Stmt::Continue { .. } => {}
             Stmt::ExprStmt { expr, .. } => {
                 infer_expr(expr, locals, fns, structs, errors);
             }

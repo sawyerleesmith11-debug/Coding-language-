@@ -99,6 +99,23 @@ pub enum Stmt {
     /// structs (unchanged, existing scope limits) -- this only adds
     /// mutability to an existing struct-typed local's own fields.
     FieldAssign { target: Symbol, field: Symbol, value: Expr, span: Span },
+    /// `break;` -- jumps to right after the innermost enclosing loop.
+    /// Only valid inside a `while`/`for` body (checked in resolve.rs);
+    /// general-for's `for` desugars to a `While` before this ever runs,
+    /// so this only ever needs to be handled for `While`/`RangeFor`.
+    Break { span: Span },
+    /// `continue;` -- jumps to the innermost enclosing loop's next
+    /// iteration. For a `RangeFor`, this still runs the implicit `+1`
+    /// step before rechecking the condition (real "next iteration", not
+    /// "recheck now"). For a `While` -- including one produced by
+    /// general-for's desugar, since by codegen time it's indistinguishable
+    /// from a hand-written `while` -- this jumps straight to the
+    /// condition recheck, which means a `continue` inside a general-for
+    /// loop's body skips that loop's step clause. This is a real,
+    /// deliberate consequence of general-for being pure sugar for
+    /// `Let`+`While` (see parser.rs's desugar), not a bug: `while`'s own
+    /// `continue` semantics don't have a separate "step" to preserve.
+    Continue { span: Span },
     If { cond: Expr, then_block: Vec<Stmt>, else_block: Option<Vec<Stmt>>, span: Span },
     While { cond: Expr, body: Vec<Stmt>, span: Span },
     RangeFor { var: Symbol, start: Expr, end: Expr, body: Vec<Stmt>, span: Span },

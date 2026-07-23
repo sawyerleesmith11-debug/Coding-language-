@@ -1998,6 +1998,187 @@ fn general_for_counts_down_by_two() {
 }
 
 #[test]
+fn break_exits_a_while_loop_early() {
+    let scratch = scratch_dir("break_while");
+    let src_path = scratch.join("prog.kes");
+    fs::write(
+        &src_path,
+        "fn main() {\n\
+         \x20   let i = 0;\n\
+         \x20   let total = 0;\n\
+         \x20   while (i < 100) {\n\
+         \x20       if (i == 5) {\n\
+         \x20           break;\n\
+         \x20       }\n\
+         \x20       total = total + i;\n\
+         \x20       i = i + 1;\n\
+         \x20   }\n\
+         \x20   print(total);\n\
+         }\n",
+    )
+    .unwrap();
+
+    let out = Command::new(kestrelc_bin())
+        .arg(&src_path)
+        .current_dir(&scratch)
+        .output()
+        .expect("failed to run kestrelc");
+    assert!(out.status.success(), "compile failed:\n{}", String::from_utf8_lossy(&out.stderr));
+
+    let bin = scratch.join("prog");
+    let run = Command::new(&bin).output().expect("failed to run compiled binary");
+    assert_eq!(native_stdout(&run), "10\n");
+}
+
+#[test]
+fn continue_skips_the_rest_of_the_current_iteration() {
+    let scratch = scratch_dir("continue_while");
+    let src_path = scratch.join("prog.kes");
+    fs::write(
+        &src_path,
+        "fn main() {\n\
+         \x20   let i = 0;\n\
+         \x20   let total = 0;\n\
+         \x20   while (i < 10) {\n\
+         \x20       i = i + 1;\n\
+         \x20       if (i % 2 == 0) {\n\
+         \x20           continue;\n\
+         \x20       }\n\
+         \x20       total = total + i;\n\
+         \x20   }\n\
+         \x20   print(total);\n\
+         }\n",
+    )
+    .unwrap();
+
+    let out = Command::new(kestrelc_bin())
+        .arg(&src_path)
+        .current_dir(&scratch)
+        .output()
+        .expect("failed to run kestrelc");
+    assert!(out.status.success(), "compile failed:\n{}", String::from_utf8_lossy(&out.stderr));
+
+    let bin = scratch.join("prog");
+    let run = Command::new(&bin).output().expect("failed to run compiled binary");
+    assert_eq!(native_stdout(&run), "25\n");
+}
+
+#[test]
+fn continue_still_runs_a_range_fors_implicit_step() {
+    let scratch = scratch_dir("continue_range_for");
+    let src_path = scratch.join("prog.kes");
+    fs::write(
+        &src_path,
+        "fn main() {\n\
+         \x20   let total = 0;\n\
+         \x20   for i from 0 to 10 {\n\
+         \x20       if (i % 2 == 0) {\n\
+         \x20           continue;\n\
+         \x20       }\n\
+         \x20       total = total + i;\n\
+         \x20   }\n\
+         \x20   print(total);\n\
+         }\n",
+    )
+    .unwrap();
+
+    let out = Command::new(kestrelc_bin())
+        .arg(&src_path)
+        .current_dir(&scratch)
+        .output()
+        .expect("failed to run kestrelc");
+    assert!(out.status.success(), "compile failed:\n{}", String::from_utf8_lossy(&out.stderr));
+
+    let bin = scratch.join("prog");
+    let run = Command::new(&bin).output().expect("failed to run compiled binary");
+    assert_eq!(native_stdout(&run), "25\n");
+}
+
+#[test]
+fn continue_still_runs_a_general_fors_step() {
+    // Regression test: without inject_step_before_continues (see
+    // parser.rs), this exact program hangs forever -- `continue` would
+    // jump straight to the desugared while's condition recheck,
+    // skipping `i = i + 1` entirely, so `i` never reaches 5.
+    let scratch = scratch_dir("continue_general_for");
+    let src_path = scratch.join("prog.kes");
+    fs::write(
+        &src_path,
+        "fn main() {\n\
+         \x20   let total = 0;\n\
+         \x20   for i = 0, i < 5, i = i + 1 {\n\
+         \x20       if (i == 2) {\n\
+         \x20           continue;\n\
+         \x20       }\n\
+         \x20       total = total + 1;\n\
+         \x20   }\n\
+         \x20   print(total);\n\
+         }\n",
+    )
+    .unwrap();
+
+    let out = Command::new(kestrelc_bin())
+        .arg(&src_path)
+        .current_dir(&scratch)
+        .output()
+        .expect("failed to run kestrelc");
+    assert!(out.status.success(), "compile failed:\n{}", String::from_utf8_lossy(&out.stderr));
+
+    let bin = scratch.join("prog");
+    let run = Command::new(&bin).output().expect("failed to run compiled binary");
+    assert_eq!(native_stdout(&run), "4\n");
+}
+
+#[test]
+fn break_in_an_inner_loop_does_not_affect_the_outer_loop() {
+    let scratch = scratch_dir("break_nested");
+    let src_path = scratch.join("prog.kes");
+    fs::write(
+        &src_path,
+        "fn main() {\n\
+         \x20   let count = 0;\n\
+         \x20   for i from 0 to 5 {\n\
+         \x20       for j from 0 to 5 {\n\
+         \x20           if (j == 2) {\n\
+         \x20               break;\n\
+         \x20           }\n\
+         \x20           count = count + 1;\n\
+         \x20       }\n\
+         \x20   }\n\
+         \x20   print(count);\n\
+         }\n",
+    )
+    .unwrap();
+
+    let out = Command::new(kestrelc_bin())
+        .arg(&src_path)
+        .current_dir(&scratch)
+        .output()
+        .expect("failed to run kestrelc");
+    assert!(out.status.success(), "compile failed:\n{}", String::from_utf8_lossy(&out.stderr));
+
+    let bin = scratch.join("prog");
+    let run = Command::new(&bin).output().expect("failed to run compiled binary");
+    assert_eq!(native_stdout(&run), "10\n");
+}
+
+#[test]
+fn break_outside_a_loop_is_rejected_at_compile_time() {
+    let scratch = scratch_dir("break_outside_loop");
+    let src_path = scratch.join("prog.kes");
+    fs::write(&src_path, "fn main() {\n    print(1);\n    break;\n}\n").unwrap();
+
+    let out = Command::new(kestrelc_bin())
+        .arg(&src_path)
+        .current_dir(&scratch)
+        .output()
+        .expect("failed to run kestrelc");
+    assert!(!out.status.success(), "expected a compile error for 'break' outside a loop");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("'break' used outside a loop"), "got: {stderr}");
+}
+
+#[test]
 fn general_for_supports_a_data_dependent_early_style_condition() {
     // General-for's condition can be arbitrary -- not just a bound check
     // against a fixed end value. This is the shape range-for can never

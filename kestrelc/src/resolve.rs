@@ -119,6 +119,7 @@ fn walk_stmts_for_size_warnings(stmts: &[Stmt], warnings: &mut Vec<KestrelcWarni
             }
             Stmt::Return { value: Some(v), .. } => walk_expr_for_size_warnings(v, warnings),
             Stmt::Return { value: None, .. } => {}
+            Stmt::Break { .. } | Stmt::Continue { .. } => {}
             Stmt::ExprStmt { expr, .. } => walk_expr_for_size_warnings(expr, warnings),
         }
     }
@@ -258,7 +259,7 @@ fn resolve_fn(
         }
     }
     for s in &fn_.body {
-        resolve_stmt(s, &mut locals, &mut struct_locals, fns, structs, errors);
+        resolve_stmt(s, &mut locals, &mut struct_locals, fns, structs, 0, errors);
     }
 }
 
@@ -432,12 +433,14 @@ fn resolve_expr(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn resolve_stmt(
     s: &Stmt,
     locals: &mut HashSet<Symbol>,
     struct_locals: &mut HashMap<Symbol, Symbol>,
     fns: &HashMap<Symbol, &Fn>,
     structs: &HashMap<Symbol, &StructDecl>,
+    loop_depth: u32,
     errors: &mut Vec<KestrelcError>,
 ) {
     match s {
@@ -501,18 +504,18 @@ fn resolve_stmt(
         Stmt::If { cond, then_block, else_block, span } => {
             resolve_expr(cond, locals, struct_locals, fns, structs, *span, errors);
             for st in then_block {
-                resolve_stmt(st, locals, struct_locals, fns, structs, errors);
+                resolve_stmt(st, locals, struct_locals, fns, structs, loop_depth, errors);
             }
             if let Some(eb) = else_block {
                 for st in eb {
-                    resolve_stmt(st, locals, struct_locals, fns, structs, errors);
+                    resolve_stmt(st, locals, struct_locals, fns, structs, loop_depth, errors);
                 }
             }
         }
         Stmt::While { cond, body, span } => {
             resolve_expr(cond, locals, struct_locals, fns, structs, *span, errors);
             for st in body {
-                resolve_stmt(st, locals, struct_locals, fns, structs, errors);
+                resolve_stmt(st, locals, struct_locals, fns, structs, loop_depth + 1, errors);
             }
         }
         Stmt::RangeFor { var, start, end, body, span } => {
@@ -520,7 +523,17 @@ fn resolve_stmt(
             resolve_expr(end, locals, struct_locals, fns, structs, *span, errors);
             locals.insert(*var);
             for st in body {
-                resolve_stmt(st, locals, struct_locals, fns, structs, errors);
+                resolve_stmt(st, locals, struct_locals, fns, structs, loop_depth + 1, errors);
+            }
+        }
+        Stmt::Break { span } => {
+            if loop_depth == 0 {
+                errors.push(KestrelcError::new(ErrorKind::Resolve, "'break' used outside a loop".to_string(), *span));
+            }
+        }
+        Stmt::Continue { span } => {
+            if loop_depth == 0 {
+                errors.push(KestrelcError::new(ErrorKind::Resolve, "'continue' used outside a loop".to_string(), *span));
             }
         }
         Stmt::Print { args, span } => {
@@ -548,6 +561,35 @@ mod tests {
         let fns = build_fn_table(&program);
         let structs = build_struct_table(&program);
         resolve(&program, &fns, &structs)
+    }
+
+    #[test]
+    fn break_outside_any_loop_is_a_resolve_error() {
+        let errors = resolve_src("fn main() { print(1); break; }");
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].message.contains("'break' used outside a loop"));
+    }
+
+    #[test]
+    fn continue_outside_any_loop_is_a_resolve_error() {
+        let errors = resolve_src("fn main() { print(1); continue; }");
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].message.contains("'continue' used outside a loop"));
+    }
+
+    #[test]
+    fn break_inside_a_while_loop_is_allowed() {
+        let errors = resolve_src("fn main() { while (true) { break; } }");
+        assert!(errors.is_empty(), "expected no resolve errors, got: {:?}", errors);
+    }
+
+    #[test]
+    fn break_inside_an_if_inside_a_while_loop_is_still_allowed() {
+        // Loop depth must survive nesting into a non-loop construct (If)
+        // -- proves the depth counter isn't reset by every recursive
+        // resolve_stmt call, only by entering/leaving an actual loop.
+        let errors = resolve_src("fn main() { while (true) { if (true) { break; } } }");
+        assert!(errors.is_empty(), "expected no resolve errors, got: {:?}", errors);
     }
 
     #[test]

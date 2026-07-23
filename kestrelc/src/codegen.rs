@@ -247,6 +247,7 @@ fn infer_array_param_lengths(program: &Program) -> HashMap<Symbol, Vec<usize>> {
                 }
                 Stmt::Return { value: Some(v), .. } => visit_expr(v, known_lens, array_positions, proofs),
                 Stmt::Return { value: None, .. } => {}
+                Stmt::Break { .. } | Stmt::Continue { .. } => {}
                 Stmt::ExprStmt { expr, .. } => visit_expr(expr, known_lens, array_positions, proofs),
             }
         }
@@ -842,6 +843,7 @@ impl Codegen {
                 my_where: self.where_info.get(&f.name),
                 epilogue,
                 cur_span: f.span,
+                loop_stack: Vec::new(),
             };
             let terminated = fc.gen_block(&f.body)?;
             if let Some((epilogue_blk, ret_var)) = fc.epilogue {
@@ -1067,6 +1069,20 @@ struct FnCodegen<'a> {
     /// inside one statement's expression tree points at that whole
     /// statement, not the exact sub-expression.
     cur_span: Span,
+    /// One entry per currently-active enclosing loop, innermost last —
+    /// `break`/`continue` (see gen_stmt's arms) jump to `.1`/`.0`
+    /// respectively. For `While`, both are the loop's own header/after
+    /// blocks (continue re-checks the condition directly, the same
+    /// place a `while` loop's own back-edge already jumps to). For
+    /// `RangeFor`, `.0` is a dedicated increment block distinct from the
+    /// header block, so `continue` still runs the implicit `+1` step
+    /// before rechecking -- jumping straight to the header would skip
+    /// it. Pushed on entry to a loop's body, popped after -- resolve.rs
+    /// already rejects a `break`/`continue` outside any loop, so an
+    /// empty stack here is never actually reached by a valid program,
+    /// but `gen_stmt`'s Break/Continue arms still handle it defensively
+    /// with a clear internal-error message rather than panicking.
+    loop_stack: Vec<(Block, Block)>,
 }
 
 type CgResult<T> = Result<T, KestrelcError>;
@@ -1267,6 +1283,8 @@ impl<'a> FnCodegen<'a> {
             | Stmt::RangeFor { span, .. }
             | Stmt::Print { span, .. }
             | Stmt::Return { span, .. }
+            | Stmt::Break { span, .. }
+            | Stmt::Continue { span, .. }
             | Stmt::ExprStmt { span, .. } => *span,
         };
         match s {
@@ -1351,7 +1369,13 @@ impl<'a> FnCodegen<'a> {
                 // header_blk is sealed after the body's back-edge is known.
 
                 self.builder.switch_to_block(body_blk);
+                // `continue` re-checks the condition directly (jumps to
+                // header_blk, the same place the body's own normal
+                // back-edge below jumps to) -- a `while` loop has no
+                // separate step to preserve, unlike RangeFor below.
+                self.loop_stack.push((header_blk, after_blk));
                 let body_term = self.gen_block(body)?;
+                self.loop_stack.pop();
                 if !body_term {
                     self.builder.ins().jump(header_blk, &[]);
                 }
@@ -1381,6 +1405,11 @@ impl<'a> FnCodegen<'a> {
 
                 let header_blk = self.builder.create_block();
                 let body_blk = self.builder.create_block();
+                // Distinct from header_blk specifically so `continue`
+                // still runs the `+1` step before rechecking the
+                // condition -- jumping straight to header_blk would skip
+                // it (real "next iteration", not "recheck now").
+                let increment_blk = self.builder.create_block();
                 let after_blk = self.builder.create_block();
 
                 self.builder.ins().jump(header_blk, &[]);
@@ -1391,19 +1420,39 @@ impl<'a> FnCodegen<'a> {
                 self.builder.ins().brif(c, body_blk, &[], after_blk, &[]);
 
                 self.builder.switch_to_block(body_blk);
+                self.loop_stack.push((increment_blk, after_blk));
                 let body_term = self.gen_block(body)?;
+                self.loop_stack.pop();
                 if !body_term {
-                    let cur = self.builder.use_var(var_v);
-                    let next = self.builder.ins().iadd_imm(cur, 1);
-                    self.builder.def_var(var_v, next);
-                    self.builder.ins().jump(header_blk, &[]);
+                    self.builder.ins().jump(increment_blk, &[]);
                 }
                 self.builder.seal_block(body_blk);
+
+                self.builder.switch_to_block(increment_blk);
+                let cur = self.builder.use_var(var_v);
+                let next = self.builder.ins().iadd_imm(cur, 1);
+                self.builder.def_var(var_v, next);
+                self.builder.ins().jump(header_blk, &[]);
+                self.builder.seal_block(increment_blk);
                 self.builder.seal_block(header_blk);
 
                 self.builder.switch_to_block(after_blk);
                 self.builder.seal_block(after_blk);
                 Ok(false)
+            }
+            Stmt::Break { .. } => {
+                let Some(&(_, after_blk)) = self.loop_stack.last() else {
+                    return Err(self.err("internal error: 'break' reached codegen outside any loop -- resolve.rs should have rejected this".to_string()));
+                };
+                self.builder.ins().jump(after_blk, &[]);
+                Ok(true)
+            }
+            Stmt::Continue { .. } => {
+                let Some(&(continue_target, _)) = self.loop_stack.last() else {
+                    return Err(self.err("internal error: 'continue' reached codegen outside any loop -- resolve.rs should have rejected this".to_string()));
+                };
+                self.builder.ins().jump(continue_target, &[]);
+                Ok(true)
             }
             Stmt::Print { args, .. } => {
                 self.gen_print(args)?;

@@ -142,6 +142,7 @@ pub fn check_purity(program: &Program, fns: &HashMap<Symbol, &Fn>) -> Vec<Kestre
                         visit_expr(v, fns, cache, stack, impure);
                     }
                 }
+                Stmt::Break { .. } | Stmt::Continue { .. } => {}
                 Stmt::ExprStmt { expr, .. } => visit_expr(expr, fns, cache, stack, impure),
             }
         }
@@ -291,6 +292,7 @@ pub fn check_parallel_map(program: &Program, fns: &HashMap<Symbol, &Fn>) -> Vec<
                     visit_expr(v, fns, *span, errors);
                 }
             }
+            Stmt::Break { .. } | Stmt::Continue { .. } => {}
             Stmt::ExprStmt { expr, span } => visit_expr(expr, fns, *span, errors),
         }
     }

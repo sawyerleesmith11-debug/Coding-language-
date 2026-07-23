@@ -202,6 +202,7 @@ fn cse_block(body: &mut [Stmt], fns: &HashMap<Symbol, Fn>) {
                     rewrite_expr(v, fns, &available);
                 }
             }
+            Stmt::Break { .. } | Stmt::Continue { .. } => {}
             Stmt::ExprStmt { expr, .. } => rewrite_expr(expr, fns, &available),
         }
     }

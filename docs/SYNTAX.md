@@ -63,11 +63,16 @@ name: [i32; N]     // fixed-size array type; N is a symbolic or literal bound
 ```
 let x = 5;
 x = x + 1;          // assignment to an already-declared local
+x += 1;              // same as x = x + 1;
 ```
 
 There's no `const`/`mut` distinction and no block scoping — `let`
 introduces a binding into the enclosing function's flat environment.
-Assigning to a name that was never `let`-declared is a runtime error.
+Assigning to a name that was never `let`-declared is a compile error.
+
+Compound assignment (`+= -= *= /= %=`) is pure sugar for the equivalent
+`x = x <op> value;` — parsed and desugared before anything else ever
+sees it, so it's exactly as fast as writing it out by hand.
 
 ## Functions
 
@@ -144,15 +149,30 @@ fn add(x: i32, y: i32) -> i32 { return x + y; }
 add(1, 2, 3);   // Rejected: 'add' expects 2 arguments, got 3
 ```
 
-**What this deliberately doesn't do yet:** check a call site's argument
-*kinds* against the callee's declared parameter type names (`foo(x:
-i32)` called as `foo(some_bool)` isn't caught) — that needs a real
-decision about what Kestrel's built-in types actually are first, since
-today `i32`/`usize`/anything else are just arbitrary identifiers (see
-"Types" above). A function parameter's kind is always treated as
-unknown inside its own body for the same reason. Every rule only fires
-when it's *sure* — it never guesses, so a program that would otherwise
-run correctly is never rejected.
+A call site's argument *kinds* are also checked against the callee's
+declared parameter type names, a struct literal/field-assignment
+value's kind is checked against that field's declared type, and a
+`return` value's kind is checked against the function's declared
+return type:
+
+```
+fn f(x: i64) { print(x); }
+f(true);   // Rejected: argument 1 to 'f': expected int, found bool
+
+struct Point { x: i64, y: i64 }
+let p = Point { x: true, y: 2 };   // Rejected: field 'x' of 'Point': expected int, found bool
+
+fn g() -> i64 { return true; }   // Rejected: return value doesn't match declared return type: expected int, found bool
+```
+
+Every integer type name (`i64`, `i32`, `usize`, ...) is treated as the
+same `int` kind for these checks — there's still only one runtime
+integer representation (see "Types" above), this just lets the checker
+recognize the one that already exists, not a real `i32`/`i64`
+distinction. A function parameter's declared type also now seeds its
+kind inside its own function body (previously always unknown). Every
+rule only fires when it's *sure* — it never guesses, so a program that
+would otherwise run correctly is never rejected.
 
 ## Arrays & bounds proofs
 
@@ -182,13 +202,44 @@ if (cond) {
 while (cond) {
     ...
 }
+
+for i from 0 to 5 {
+    ...
+}
+
+for i = 0, i < n, i = i + 2 {
+    ...
+}
 ```
 
 - `else` is optional.
-- There's no `for`, no `break`/`continue`, no `match`/`switch`.
+- There's no `match`/`switch`.
 - `if`/`while` conditions are plain expressions — no parens required
   around sub-expressions, but the outer parens around the condition
   itself are mandatory (`if (x) { }`, not `if x { }`).
+- **Range-for**: `for i from <start> to <end> { }` — `i` is a fresh i64
+  bound for the loop, step is always exactly `+1`, `end` is exclusive
+  (`for i from 0 to 5` visits `0, 1, 2, 3, 4`, not 5). `start`/`end` are
+  evaluated exactly once, at loop entry, never re-evaluated per
+  iteration. If `start >= end` the loop runs zero times, not an error.
+  Deliberately restricted (no custom step, no arbitrary condition) —
+  the restriction is what a future compile-time optimization pass can
+  rely on to recognize the shape safely.
+- **General-for**: `for i = <init>, <cond>, i = <step> { }` — the fully
+  general three-clause form (arbitrary start, condition, and step
+  expression). The step clause's left side must be the same identifier
+  the init clause declared. This is pure syntax sugar for
+  `let i = <init>; while (<cond>) { ...body; i = <step>; }` — same
+  performance, same everything, as writing the `while` out by hand.
+- **`break;`** exits the innermost enclosing loop immediately.
+- **`continue;`** jumps to the next iteration of the innermost enclosing
+  loop. For range-for, this still runs the implicit `+1` step before
+  rechecking the condition. For general-for, this still runs the step
+  clause too (the parser rewrites a bare `continue;` in a general-for
+  body into "run the step, then continue" specifically so this works
+  the way a C-style `for` loop's `continue` would, even though
+  general-for desugars to a plain `while` under the hood). Both are a
+  compile error if used outside any loop.
 
 ## `print`
 
@@ -288,18 +339,30 @@ fn main() {
 ```
 
 `kestrelc` only, as of this writing (`kestrel.js`'s `run()`/`runFast()`
-are frozen — see `kestrel-DESIGN.md`). Immutable: construct once, read
-fields, no field assignment. Scalar fields only — no arrays, no nested
+are frozen — see `kestrel-DESIGN.md`). A field can be reassigned after
+construction (`p.x = 5;`). Scalar fields only — no arrays, no nested
 structs. A struct can be a local variable or a function parameter, not
 a function return value.
+
+```kestrel
+struct Point { x: i64, y: i64 }
+fn main() {
+    let p = Point { x: 1, y: 2 };
+    p.x = 10;
+    print(p.x, p.y);
+}
+```
 
 ## Known gaps (not bugs — just not built yet)
 
 - No string operations beyond literals (no concatenation operator,
   no indexing into strings).
-- No `for`, `break`, `continue`, `match`.
+- No `match`.
 - No modules/imports — a program is a flat list of functions in one file.
 - No int overflow, no float/int distinction at runtime.
+- No compound assignment beyond `+= -= *= /= %=` (no `&=`/`|=`/etc. —
+  there's nothing to compound them with yet, no bitwise operators
+  exist at all).
 - `where` clauses are advisory only (see [Bounds proofs](#arrays--bounds-proofs)) —
   they don't yet eliminate the runtime check or turn unprovable call
   sites into compile errors, both of which are the design's actual goal.

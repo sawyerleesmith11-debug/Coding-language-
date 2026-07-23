@@ -120,6 +120,7 @@ fn walk_stmts_exprs<'a>(stmts: &'a [Stmt], on_expr: &mut impl FnMut(&'a Expr)) {
             }
             Stmt::Return { value: Some(e), .. } => on_expr(e),
             Stmt::Return { value: None, .. } => {}
+            Stmt::Break { .. } | Stmt::Continue { .. } => {}
         }
     }
 }
@@ -294,6 +295,8 @@ fn inline_stmts(stmts: &[Stmt], candidates: &HashMap<Symbol, Candidate>) -> Vec<
             Stmt::Return { value, span } => {
                 Stmt::Return { value: value.as_ref().map(|e| inline_expr(e, candidates)), span: *span }
             }
+            Stmt::Break { span } => Stmt::Break { span: *span },
+            Stmt::Continue { span } => Stmt::Continue { span: *span },
             Stmt::ExprStmt { expr, span } => {
                 Stmt::ExprStmt { expr: inline_expr(expr, candidates), span: *span }
             }
