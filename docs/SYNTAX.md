@@ -174,6 +174,13 @@ kind inside its own function body (previously always unknown). Every
 rule only fires when it's *sure* — it never guesses, so a program that
 would otherwise run correctly is never rejected.
 
+**Known gap:** a struct field *read* (`p.x` used in an expression) is
+not yet type-checked — only field *writes* (`Point { x: ... }`,
+`p.x = ...`) are. Array element types also aren't tracked yet (all
+arrays are one `array` kind, regardless of declared element type). See
+`docs/superpowers/specs/2026-07-23-type-system-foundation-design.md`
+for the plan to close both.
+
 ## Arrays & bounds proofs
 
 ```
@@ -366,5 +373,11 @@ fn main() {
 - `where` clauses are advisory only (see [Bounds proofs](#arrays--bounds-proofs)) —
   they don't yet eliminate the runtime check or turn unprovable call
   sites into compile errors, both of which are the design's actual goal.
+- Struct field *reads* aren't type-checked (writes are); array element
+  types aren't tracked (see "Type checking" above and
+  `docs/superpowers/specs/2026-07-23-type-system-foundation-design.md`).
+- No guarantee/refinement types yet (`NonZero`, `Range<T,min,max>`,
+  fixed-length `Array<T,N>`) — planned, staged, not started; see the
+  same design doc's ranked list.
 
 See `kestrel-DESIGN.md` for what's planned beyond this.
